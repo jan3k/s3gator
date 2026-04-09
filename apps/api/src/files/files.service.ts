@@ -18,14 +18,18 @@ import {
 import type { BucketPermission, SessionUser } from "@s3gator/shared";
 import type { Prisma } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { PrismaService } from "@/prisma/prisma.service.js";
 import { ConnectionsService } from "@/connections/connections.service.js";
 import { AuthorizationService } from "@/authorization/authorization.service.js";
 import { AuditService } from "@/audit/audit.service.js";
 import { MetricsService } from "@/metrics/metrics.service.js";
+import { getCorrelationId } from "@/common/request-context.js";
 
 @Injectable()
 export class FilesService {
+  private readonly tracer = trace.getTracer("s3gator.api.files");
+
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
@@ -48,14 +52,21 @@ export class FilesService {
   async list(user: SessionUser, input: { bucket: string; prefix: string; continuationToken?: string; recursive: boolean; pageSize: number; sortBy: "name" | "size" | "lastModified" | "type"; sortOrder: "asc" | "desc"; }) {
     await this.authorizationService.requireBucketPermission(user, input.bucket, "object:list");
     const s3 = await this.getS3Client();
-
-    return listFiles(s3, input.prefix, input.bucket, {
-      continuationToken: input.continuationToken,
-      recursive: input.recursive,
-      pageSize: input.pageSize,
-      sortBy: input.sortBy,
-      sortOrder: input.sortOrder
-    });
+    return this.withSpan(
+      "files.list",
+      {
+        bucket: input.bucket,
+        prefix: input.prefix
+      },
+      () =>
+        listFiles(s3, input.prefix, input.bucket, {
+          continuationToken: input.continuationToken,
+          recursive: input.recursive,
+          pageSize: input.pageSize,
+          sortBy: input.sortBy,
+          sortOrder: input.sortOrder
+        })
+    );
   }
 
   async createFolder(user: SessionUser, input: { bucket: string; folderPath: string }, ipAddress?: string) {
@@ -80,10 +91,18 @@ export class FilesService {
 
     const s3 = await this.getS3Client();
     const startedAt = Date.now();
-    const result = await deleteFileOrFolder(s3, input.key, input.bucket).catch((error: Error) => {
-      this.metricsService.recordS3Failure(input.key.endsWith("/") ? "folder_delete" : "object_delete");
-      throw error;
-    });
+    const result = await this.withSpan(
+      "files.delete",
+      {
+        bucket: input.bucket,
+        key: input.key
+      },
+      async () =>
+        deleteFileOrFolder(s3, input.key, input.bucket).catch((error: Error) => {
+          this.metricsService.recordS3Failure(input.key.endsWith("/") ? "folder_delete" : "object_delete");
+          throw error;
+        })
+    );
     this.metricsService.recordS3Duration(
       input.key.endsWith("/") ? "folder_delete" : "object_delete",
       (Date.now() - startedAt) / 1000
@@ -106,10 +125,19 @@ export class FilesService {
 
     const s3 = await this.getS3Client();
     const startedAt = Date.now();
-    const result = await renameFileOrFolder(s3, input.oldKey, input.newKey, input.bucket).catch((error: Error) => {
-      this.metricsService.recordS3Failure(input.oldKey.endsWith("/") ? "folder_rename" : "object_rename");
-      throw error;
-    });
+    const result = await this.withSpan(
+      "files.rename",
+      {
+        bucket: input.bucket,
+        oldKey: input.oldKey,
+        newKey: input.newKey
+      },
+      async () =>
+        renameFileOrFolder(s3, input.oldKey, input.newKey, input.bucket).catch((error: Error) => {
+          this.metricsService.recordS3Failure(input.oldKey.endsWith("/") ? "folder_rename" : "object_rename");
+          throw error;
+        })
+    );
     this.metricsService.recordS3Duration(
       input.oldKey.endsWith("/") ? "folder_rename" : "object_rename",
       (Date.now() - startedAt) / 1000
@@ -257,12 +285,21 @@ export class FilesService {
     await this.authorizationService.requireBucketPermission(user, bucket.name, "object:upload");
 
     const s3 = await this.getS3Client();
-    const result = await completeMultipartUpload(s3, {
-      bucket: bucket.name,
-      key: session.objectKey,
-      uploadId: session.uploadId,
-      parts
-    });
+    const result = await this.withSpan(
+      "files.multipart.complete",
+      {
+        bucket: bucket.name,
+        key: session.objectKey,
+        uploadSessionId
+      },
+      () =>
+        completeMultipartUpload(s3, {
+          bucket: bucket.name,
+          key: session.objectKey,
+          uploadId: session.uploadId,
+          parts
+        })
+    );
 
     await this.prisma.uploadSession.update({
       where: { id: uploadSessionId },
@@ -301,7 +338,15 @@ export class FilesService {
     const s3 = await this.getS3Client();
     let abortError: string | null = null;
     try {
-      await abortMultipartUpload(s3, bucket.name, session.objectKey, session.uploadId);
+      await this.withSpan(
+        "files.multipart.abort",
+        {
+          bucket: bucket.name,
+          key: session.objectKey,
+          uploadSessionId
+        },
+        () => abortMultipartUpload(s3, bucket.name, session.objectKey, session.uploadId)
+      );
     } catch (error) {
       abortError = (error as Error).message;
     }
@@ -343,7 +388,15 @@ export class FilesService {
     const s3 = await this.getS3Client();
     let abortError: string | null = null;
     try {
-      await abortMultipartUpload(s3, bucket.name, session.objectKey, session.uploadId);
+      await this.withSpan(
+        "files.multipart.fail_abort",
+        {
+          bucket: bucket.name,
+          key: session.objectKey,
+          uploadSessionId
+        },
+        () => abortMultipartUpload(s3, bucket.name, session.objectKey, session.uploadId)
+      );
     } catch (error) {
       abortError = (error as Error).message;
     }
@@ -659,5 +712,33 @@ export class FilesService {
       accessKeyId: conn.accessKeyId,
       secretAccessKey: conn.secretAccessKey
     });
+  }
+
+  private async withSpan<T>(
+    name: string,
+    attributes: Record<string, string | number | boolean | null | undefined>,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const span = this.tracer.startSpan(name, {
+      attributes: {
+        ...Object.fromEntries(Object.entries(attributes).filter(([, value]) => value !== undefined)),
+        correlationId: getCorrelationId() ?? undefined
+      }
+    });
+
+    try {
+      const result = await operation();
+      span.setStatus({ code: SpanStatusCode.OK });
+      return result;
+    } catch (error) {
+      span.recordException(error as Error);
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: (error as Error).message
+      });
+      throw error;
+    } finally {
+      span.end();
+    }
   }
 }

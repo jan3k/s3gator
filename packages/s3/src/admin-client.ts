@@ -4,16 +4,20 @@ import type {
   GarageBucketSummary,
   GarageClusterHealth
 } from "./types.js";
+import { context, SpanStatusCode, trace } from "@opentelemetry/api";
 
 export class GarageAdminApiV2Client {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly timeoutMs: number;
+  private readonly defaultHeaders: Record<string, string>;
+  private readonly tracer = trace.getTracer("s3gator.s3.admin-client");
 
   constructor(config: AdminClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.token = config.token;
     this.timeoutMs = config.timeoutMs ?? 10_000;
+    this.defaultHeaders = config.defaultHeaders ?? {};
   }
 
   async listBuckets(): Promise<GarageBucketSummary[]> {
@@ -69,19 +73,48 @@ export class GarageAdminApiV2Client {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const span = this.tracer.startSpan(`garage.admin.${method.toLowerCase()} ${path}`, {
+      attributes: {
+        "http.method": method,
+        "http.url": url.toString(),
+        "net.peer.name": url.hostname,
+        "net.peer.port": Number(url.port || (url.protocol === "https:" ? 443 : 80))
+      }
+    });
 
     try {
-      return await fetch(url, {
-        method,
-        signal: controller.signal,
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          "Content-Type": "application/json"
-        },
-        body: body ? JSON.stringify(body) : undefined
+      return await context.with(trace.setSpan(context.active(), span), async () => {
+        const response = await fetch(url, {
+          method,
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            "Content-Type": "application/json",
+            ...this.defaultHeaders
+          },
+          body: body ? JSON.stringify(body) : undefined
+        });
+
+        span.setAttribute("http.status_code", response.status);
+        if (!response.ok) {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: `Garage admin HTTP ${response.status}`
+          });
+        }
+
+        return response;
       });
+    } catch (error) {
+      span.recordException(error as Error);
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: (error as Error).message
+      });
+      throw error;
     } finally {
       clearTimeout(timeout);
+      span.end();
     }
   }
 }

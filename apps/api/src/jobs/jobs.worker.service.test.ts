@@ -32,7 +32,8 @@ const jobsService = {
   markCompleted: vi.fn(),
   markFailed: vi.fn(),
   markProgress: vi.fn(),
-  markCanceled: vi.fn()
+  markCanceled: vi.fn(),
+  recordEvent: vi.fn()
 };
 
 const prisma = {
@@ -119,6 +120,10 @@ describe("JobsWorkerService", () => {
 
     expect(metricsService.recordJobEvent).toHaveBeenCalledWith("FOLDER_DELETE", "start");
     expect(jobsService.markProgress).toHaveBeenCalled();
+    expect(jobsService.recordEvent).toHaveBeenCalledWith(
+      "job-1",
+      expect.objectContaining({ type: "folder_delete.started" })
+    );
     expect(auditService.record).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "object.delete",

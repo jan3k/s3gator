@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import type { SessionUser } from "@s3gator/shared";
 import { PrismaService } from "@/prisma/prisma.service.js";
+import { getRequestContext } from "@/common/request-context.js";
 
 @Injectable()
 export class AuditService {
@@ -14,22 +15,71 @@ export class AuditService {
     metadata?: unknown;
     ipAddress?: string;
   }): Promise<void> {
+    const context = getRequestContext();
+
     await this.prisma.auditLog.create({
       data: {
         actorUserId: input.actor?.id,
         action: input.action,
         entityType: input.entityType,
         entityId: input.entityId,
-        metadata: sanitizeAuditMetadata(input.metadata) as object | undefined,
+        metadata: sanitizeAuditMetadata(
+          attachContextMetadata(input.metadata, context)
+        ) as object | undefined,
         ipAddress: input.ipAddress
       }
     });
   }
 
-  async list(limit = 200) {
+  async list(input: {
+    limit?: number;
+    search?: string;
+    action?: string;
+    entityType?: string;
+  }) {
+    const limit = Math.min(Math.max(input.limit ?? 200, 1), 1000);
+
+    const where = {
+      action: input.action
+        ? {
+            contains: input.action,
+            mode: "insensitive" as const
+          }
+        : undefined,
+      entityType: input.entityType
+        ? {
+            contains: input.entityType,
+            mode: "insensitive" as const
+          }
+        : undefined,
+      OR: input.search
+        ? [
+            {
+              action: {
+                contains: input.search,
+                mode: "insensitive" as const
+              }
+            },
+            {
+              entityType: {
+                contains: input.search,
+                mode: "insensitive" as const
+              }
+            },
+            {
+              entityId: {
+                contains: input.search,
+                mode: "insensitive" as const
+              }
+            }
+          ]
+        : undefined
+    };
+
     return this.prisma.auditLog.findMany({
+      where,
       orderBy: { createdAt: "desc" },
-      take: Math.min(Math.max(limit, 1), 1000),
+      take: limit,
       include: {
         actorUser: {
           select: { id: true, username: true, email: true }
@@ -82,4 +132,39 @@ function sanitizeAuditMetadata(input: unknown): unknown {
   }
 
   return String(input);
+}
+
+function attachContextMetadata(
+  metadata: unknown,
+  context: ReturnType<typeof getRequestContext>
+): unknown {
+  if (!context) {
+    return metadata;
+  }
+
+  const contextPayload = {
+    requestId: context.requestId,
+    correlationId: context.correlationId,
+    source: context.source,
+    jobId: context.jobId ?? null,
+    userId: context.userId ?? null
+  };
+
+  if (metadata === undefined) {
+    return {
+      _context: contextPayload
+    };
+  }
+
+  if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+    return {
+      ...(metadata as Record<string, unknown>),
+      _context: contextPayload
+    };
+  }
+
+  return {
+    value: metadata,
+    _context: contextPayload
+  };
 }

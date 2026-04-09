@@ -10,14 +10,16 @@ Date: 2026-04-09
 - PostgreSQL
 - Redis
 - Garage S3 + Garage Admin API v2
+- Optional OTLP collector (for tracing)
 
 ## Required Services in Production
 
 1. PostgreSQL (persistent)
-2. Redis (shared for distributed limiter + job locks)
+2. Redis (distributed limiter + job locks)
 3. API instances (stateless)
 4. Worker instances (one or more)
-5. Garage S3 endpoint and Admin API v2 endpoint
+5. Garage S3/Admin endpoints
+6. Optional OTLP backend
 
 ## API and Worker Startup
 
@@ -36,40 +38,55 @@ npx pnpm --filter @s3gator/api start
 npx pnpm --filter @s3gator/api start:worker
 ```
 
-## Job Processing Model
-
-- Job state is persisted in PostgreSQL (`jobs` table).
-- Worker claims jobs via DB transition (`QUEUED` -> `RUNNING`) plus Redis lock key.
-- Stale `RUNNING` jobs can be re-claimed after lock TTL.
-- Supported states: `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELED`.
-
 ## Health and Metrics
 
 - Liveness: `GET /health/live`
 - Readiness: `GET /health/ready`
-- Prometheus metrics: `GET /metrics`
+- Metrics: `GET /metrics`
 
-Main metric families:
-- `s3gator_login_total`
-- `s3gator_upload_events_total`
-- `s3gator_jobs_total`
-- `s3gator_s3_failures_total`
-- `s3gator_ldap_auth_failures_total`
+Main metric families include login, upload, job, S3 error, and LDAP failure signals.
 
-## Multipart Session Maintenance
+## Job Processing and Timeline
 
-- Upload session durability is persisted in `upload_sessions`.
-- Expired in-progress sessions can be cleaned by:
-  - background `UPLOAD_CLEANUP` jobs, or
-  - admin endpoint `POST /files/multipart/cleanup-expired`.
+- Job state persists in `jobs` table.
+- Worker claim model uses DB transition + Redis lock.
+- Timeline events persist in `job_events`.
+- Cancel is best-effort and recorded explicitly in timeline events.
 
-## Integration Stack
+Operational recommendation: monitor stalled `RUNNING` jobs and inspect timeline events before retry/cancel decisions.
 
-Use:
+## Integration Lane Commands
 
 ```bash
 npx pnpm integration:up
+npx pnpm integration:bootstrap
+npx pnpm integration:test
 npx pnpm integration:down
 ```
 
-The integration compose file includes Garage, but Garage cluster/key/bucket bootstrap may still require environment-specific initialization before upload E2E flows.
+What `integration:up` does:
+
+1. starts compose stack,
+2. initializes Garage layout/key/bucket/alias,
+3. verifies API readiness,
+4. runs connection health check,
+5. queues and waits for bucket sync,
+6. verifies app bucket visibility.
+
+## Telemetry Runtime Controls
+
+Key environment variables:
+
+- `CORRELATION_HEADER_NAME` (default `x-request-id`)
+- `OTEL_ENABLED`
+- `OTEL_SERVICE_NAME`
+- `OTEL_EXPORTER_OTLP_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_HEADERS`
+
+See `docs/telemetry.md` for full setup.
+
+## Known Operational Boundaries
+
+- Rename/delete jobs are durable at job level; no per-object checkpoint resume in-flight.
+- Cancellation may wait for in-flight S3 calls to finish.
+- Integration bootstrap is deterministic for dev/CI, but production secret lifecycle should be managed separately.

@@ -1,4 +1,5 @@
 import { Injectable, UnauthorizedException } from "@nestjs/common";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import argon2 from "argon2";
 import type { LoginInput, SessionUser } from "@s3gator/shared";
 import { AppRole, AuthSource } from "@prisma/client";
@@ -16,70 +17,109 @@ interface AuthenticatedLoginResult {
 
 @Injectable()
 export class AuthService {
+  private readonly tracer = trace.getTracer("s3gator.api.auth");
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly ldapAuthService: LdapAuthService
   ) {}
 
   async login(input: LoginInput): Promise<AuthenticatedLoginResult> {
+    const span = this.tracer.startSpan("auth.login", {
+      attributes: {
+        username: input.username,
+        requestedMode: input.mode ?? "auto"
+      }
+    });
+
     const authMode = await this.getAuthMode();
     const requestedMode = input.mode;
-
-    if (authMode === "local") {
-      if (requestedMode === "ldap") {
-        throw new UnauthorizedException("LDAP login is disabled");
-      }
-      return {
-        user: await this.loginWithLocal(input.username, input.password),
-        method: "local",
-        authMode
-      };
-    }
-
-    if (authMode === "ldap") {
-      if (requestedMode === "local") {
-        throw new UnauthorizedException("Local login is disabled");
-      }
-      return {
-        user: await this.loginWithLdap(input.username, input.password),
-        method: "ldap",
-        authMode
-      };
-    }
-
-    if (requestedMode === "local") {
-      return {
-        user: await this.loginWithLocal(input.username, input.password),
-        method: "local",
-        authMode
-      };
-    }
-
-    if (requestedMode === "ldap") {
-      return {
-        user: await this.loginWithLdap(input.username, input.password),
-        method: "ldap",
-        authMode
-      };
-    }
+    span.setAttribute("auth.mode", authMode);
 
     try {
-      return {
-        user: await this.loginWithLocal(input.username, input.password),
-        method: "local",
-        authMode
-      };
-    } catch {
-      const ldapEnabled = await this.isLdapEnabled();
-      if (!ldapEnabled) {
-        throw new UnauthorizedException("Invalid username or password");
+      if (authMode === "local") {
+        if (requestedMode === "ldap") {
+          throw new UnauthorizedException("LDAP login is disabled");
+        }
+        const resolved = {
+          user: await this.loginWithLocal(input.username, input.password),
+          method: "local" as const,
+          authMode
+        };
+        span.setAttribute("auth.method", "local");
+        span.setStatus({ code: SpanStatusCode.OK });
+        return resolved;
       }
 
-      return {
-        user: await this.loginWithLdap(input.username, input.password),
-        method: "ldap",
-        authMode
-      };
+      if (authMode === "ldap") {
+        if (requestedMode === "local") {
+          throw new UnauthorizedException("Local login is disabled");
+        }
+        const resolved = {
+          user: await this.loginWithLdap(input.username, input.password),
+          method: "ldap" as const,
+          authMode
+        };
+        span.setAttribute("auth.method", "ldap");
+        span.setStatus({ code: SpanStatusCode.OK });
+        return resolved;
+      }
+
+      if (requestedMode === "local") {
+        const resolved = {
+          user: await this.loginWithLocal(input.username, input.password),
+          method: "local" as const,
+          authMode
+        };
+        span.setAttribute("auth.method", "local");
+        span.setStatus({ code: SpanStatusCode.OK });
+        return resolved;
+      }
+
+      if (requestedMode === "ldap") {
+        const resolved = {
+          user: await this.loginWithLdap(input.username, input.password),
+          method: "ldap" as const,
+          authMode
+        };
+        span.setAttribute("auth.method", "ldap");
+        span.setStatus({ code: SpanStatusCode.OK });
+        return resolved;
+      }
+
+      try {
+        const resolved = {
+          user: await this.loginWithLocal(input.username, input.password),
+          method: "local" as const,
+          authMode
+        };
+        span.setAttribute("auth.method", "local");
+        span.setStatus({ code: SpanStatusCode.OK });
+        return resolved;
+      } catch {
+        const ldapEnabled = await this.isLdapEnabled();
+        if (!ldapEnabled) {
+          throw new UnauthorizedException("Invalid username or password");
+        }
+
+        const resolved = {
+          user: await this.loginWithLdap(input.username, input.password),
+          method: "ldap" as const,
+          authMode
+        };
+        span.setAttribute("auth.method", "ldap");
+        span.setStatus({ code: SpanStatusCode.OK });
+        return resolved;
+      }
+    } catch (error) {
+      span.recordException(error as Error);
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: (error as Error).message
+      });
+      throw error;
+    } finally {
+      span.end();
     }
   }
 

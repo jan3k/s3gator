@@ -8,6 +8,7 @@ function makeJob(overrides: Record<string, unknown> = {}) {
     id: "job-1",
     type: "FOLDER_DELETE",
     status: "QUEUED",
+    correlationId: null,
     createdByUserId: "creator-1",
     createdAt: now,
     startedAt: null,
@@ -34,6 +35,10 @@ const prisma = {
     update: vi.fn(),
     updateMany: vi.fn(),
     findFirst: vi.fn()
+  },
+  jobEvent: {
+    create: vi.fn(),
+    findMany: vi.fn()
   },
   adminBucketScope: {
     findMany: vi.fn()
@@ -138,5 +143,43 @@ describe("JobsService scoped admin access", () => {
     );
 
     expect(result.map((job) => job.id)).toEqual(["job-own", "job-scope"]);
+  });
+
+  it("returns job detail with timeline events", async () => {
+    prisma.job.findUnique.mockResolvedValue(
+      makeJob({
+        id: "job-detail-1",
+        correlationId: "req-123"
+      })
+    );
+    prisma.jobEvent.findMany.mockResolvedValue([
+      {
+        id: "evt-1",
+        jobId: "job-detail-1",
+        correlationId: "req-123",
+        type: "created",
+        level: "INFO",
+        message: "Job queued",
+        metadata: null,
+        createdAt: new Date("2026-04-09T12:00:01.000Z")
+      }
+    ]);
+
+    const detail = await service.getDetail(
+      {
+        id: "super-1",
+        username: "root",
+        email: "root@example.com",
+        displayName: "Root",
+        role: "SUPER_ADMIN"
+      },
+      "job-detail-1",
+      100
+    );
+
+    expect(detail.job.id).toBe("job-detail-1");
+    expect(detail.events).toHaveLength(1);
+    expect(detail.events[0]?.type).toBe("created");
+    expect(detail.events[0]?.correlationId).toBe("req-123");
   });
 });

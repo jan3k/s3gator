@@ -41,6 +41,12 @@ enum JobStatus {
   CANCELED
 }
 
+enum JobEventLevel {
+  INFO
+  WARN
+  ERROR
+}
+
 model Role {
   id          String           @id @default(cuid())
   code        AppRole          @unique
@@ -235,6 +241,7 @@ model Job {
   id                String    @id @default(cuid())
   type              JobType
   status            JobStatus @default(QUEUED)
+  correlationId     String?
   createdByUserId   String?
   createdByUser     User?     @relation("JobCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
   payload           Json
@@ -248,7 +255,25 @@ model Job {
   startedAt         DateTime?
   completedAt       DateTime?
   updatedAt         DateTime  @updatedAt
+  events            JobEvent[]
 
   @@index([status, createdAt])
   @@index([createdByUserId, createdAt])
+  @@index([correlationId, createdAt])
+}
+
+model JobEvent {
+  id            String        @id @default(cuid())
+  jobId          String
+  job            Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  correlationId String?
+  type          String
+  level         JobEventLevel @default(INFO)
+  message       String
+  metadata      Json?
+  createdAt     DateTime      @default(now())
+
+  @@index([jobId, createdAt])
+  @@index([type, createdAt])
+  @@index([correlationId, createdAt])
 }

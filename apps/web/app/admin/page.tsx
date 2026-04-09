@@ -42,6 +42,7 @@ type Job = {
   id: string;
   type: "FOLDER_RENAME" | "FOLDER_DELETE" | "BUCKET_SYNC" | "UPLOAD_CLEANUP";
   status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELED";
+  correlationId: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -51,6 +52,22 @@ type Job = {
     totalItems?: number;
     processedItems?: number;
   } | null;
+};
+
+type JobEvent = {
+  id: string;
+  jobId: string;
+  correlationId: string | null;
+  type: string;
+  level: "INFO" | "WARN" | "ERROR";
+  message: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+};
+
+type JobDetail = {
+  job: Job;
+  events: JobEvent[];
 };
 
 type UploadSession = {
@@ -88,6 +105,7 @@ export default function AdminPage() {
   const [selectedPermissions, setSelectedPermissions] = useState<BucketPermission[]>([]);
   const [selectedAdminId, setSelectedAdminId] = useState("");
   const [selectedScopeBucketIds, setSelectedScopeBucketIds] = useState<string[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState("");
   const [statusMessage, setStatusMessage] = useState<string>("");
 
   const meQuery = useQuery({
@@ -141,6 +159,12 @@ export default function AdminPage() {
     enabled: meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN"
   });
 
+  const jobDetailQuery = useQuery({
+    queryKey: ["jobs", "detail", selectedJobId],
+    queryFn: () => apiFetch<JobDetail>(`/jobs/${selectedJobId}/detail?limit=400`),
+    enabled: Boolean(selectedJobId) && (meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN")
+  });
+
   const uploadSessionsQuery = useQuery({
     queryKey: ["admin", "upload-sessions"],
     queryFn: () => apiFetch<UploadSession[]>("/files/multipart/sessions?scope=all&limit=100"),
@@ -170,6 +194,12 @@ export default function AdminPage() {
     }
     setSelectedScopeBucketIds(adminScopesQuery.data.map((scope) => scope.bucketId));
   }, [adminScopesQuery.data]);
+
+  useEffect(() => {
+    if (!selectedJobId && jobsQuery.data?.[0]?.id) {
+      setSelectedJobId(jobsQuery.data[0].id);
+    }
+  }, [jobsQuery.data, selectedJobId]);
 
   const auditQuery = useQuery({
     queryKey: ["admin", "audit"],
@@ -298,6 +328,9 @@ export default function AdminPage() {
     onSuccess: () => {
       setStatusMessage("Job cancellation requested");
       void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
+      if (selectedJobId) {
+        void queryClient.invalidateQueries({ queryKey: ["jobs", "detail", selectedJobId] });
+      }
     }
   });
 
@@ -690,6 +723,10 @@ export default function AdminPage() {
             </button>
           </div>
 
+          <p className="mb-2 text-xs text-slate-500">
+            Cancel is best-effort. In-flight S3 requests may complete before worker cancellation checkpoints.
+          </p>
+
           <div className="max-h-80 overflow-auto rounded border border-slate-200">
             <table className="min-w-full text-xs">
               <thead className="bg-slate-50 text-left uppercase text-slate-500">
@@ -698,13 +735,17 @@ export default function AdminPage() {
                   <th className="px-3 py-2">Status</th>
                   <th className="px-3 py-2">Progress</th>
                   <th className="px-3 py-2">Failure</th>
+                  <th className="px-3 py-2">Correlation</th>
                   <th className="px-3 py-2">Created</th>
                   <th className="px-3 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {jobsQuery.data?.map((job) => (
-                  <tr key={job.id}>
+                  <tr
+                    key={job.id}
+                    className={selectedJobId === job.id ? "bg-slate-50" : undefined}
+                  >
                     <td className="px-3 py-2">{job.type}</td>
                     <td className="px-3 py-2">{job.status}</td>
                     <td className="px-3 py-2">
@@ -713,8 +754,17 @@ export default function AdminPage() {
                         : "-"}
                     </td>
                     <td className="px-3 py-2">{job.failureSummary ?? "-"}</td>
+                    <td className="max-w-52 truncate px-3 py-2 font-mono text-[11px]">{job.correlationId ?? "-"}</td>
                     <td className="px-3 py-2">{job.createdAt}</td>
-                    <td className="px-3 py-2">
+                    <td className="px-3 py-2 space-x-1">
+                      <button
+                        className="rounded border border-slate-300 px-2 py-1 text-[11px]"
+                        onClick={() => {
+                          setSelectedJobId(job.id);
+                        }}
+                      >
+                        Details
+                      </button>
                       {(job.status === "QUEUED" || job.status === "RUNNING") ? (
                         <button
                           className="rounded border border-red-300 px-2 py-1 text-[11px] text-red-700"
@@ -732,6 +782,59 @@ export default function AdminPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          <div className="mt-3 rounded border border-slate-200 p-3">
+            <h3 className="text-sm font-semibold text-slate-900">Job timeline</h3>
+            {selectedJobId ? (
+              <>
+                <p className="mt-1 text-xs text-slate-500">
+                  Selected job: <span className="font-mono">{selectedJobId}</span>
+                </p>
+                {jobDetailQuery.isLoading ? (
+                  <p className="mt-2 text-xs text-slate-500">Loading timeline…</p>
+                ) : null}
+                {jobDetailQuery.data ? (
+                  <div className="mt-3 space-y-2">
+                    <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                      <div>Status: {jobDetailQuery.data.job.status}</div>
+                      <div>Correlation ID: <span className="font-mono">{jobDetailQuery.data.job.correlationId ?? "-"}</span></div>
+                      <div>Failure: {jobDetailQuery.data.job.failureSummary ?? "-"}</div>
+                    </div>
+                    <div className="max-h-64 overflow-auto rounded border border-slate-200">
+                      <table className="min-w-full text-xs">
+                        <thead className="bg-slate-50 text-left uppercase text-slate-500">
+                          <tr>
+                            <th className="px-3 py-2">Time</th>
+                            <th className="px-3 py-2">Level</th>
+                            <th className="px-3 py-2">Type</th>
+                            <th className="px-3 py-2">Message</th>
+                            <th className="px-3 py-2">Metadata</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {jobDetailQuery.data.events.map((event) => (
+                            <tr key={event.id}>
+                              <td className="px-3 py-2">{event.createdAt}</td>
+                              <td className="px-3 py-2">{event.level}</td>
+                              <td className="px-3 py-2">{event.type}</td>
+                              <td className="px-3 py-2">{event.message}</td>
+                              <td className="max-w-96 truncate px-3 py-2 font-mono">
+                                {event.metadata ? JSON.stringify(event.metadata) : "-"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-slate-500">No timeline data.</p>
+                )}
+              </>
+            ) : (
+              <p className="mt-2 text-xs text-slate-500">Select a job to inspect timeline events.</p>
+            )}
           </div>
         </section>
       ) : null}

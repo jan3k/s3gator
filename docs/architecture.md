@@ -1,4 +1,4 @@
-# Architecture: Stage 3 (Resilience, Jobs, Operations)
+# Architecture: Stage 4 (Bootstrap, Timeline, Telemetry)
 
 Date: 2026-04-09
 
@@ -12,117 +12,123 @@ Date: 2026-04-09
 
 ## Runtime Topology
 
-Recommended production runtime:
+Recommended production topology:
 
 1. API instances (stateless)
-2. Worker instances (job execution loop)
+2. Worker instances (job execution)
 3. PostgreSQL (system of record)
-4. Redis (distributed limiter + runtime locking)
-5. Garage S3 endpoint + Garage Admin API v2 endpoint
+4. Redis (distributed limiter + locks)
+5. Garage S3 + Garage Admin API v2
+6. Optional OTLP collector backend for traces
 
-## Security and Auth
+## Security and Auth Model
 
-- Local auth (Argon2id) + LDAP auth.
-- Auth mode (`local` / `ldap` / `hybrid`) is enforced in `AuthService`.
-- Session cookies are HTTP-only; mutating calls require CSRF token.
-- Authorization is app-native RBAC + per-bucket permissions.
-- `bucket:list` is explicit and required for bucket visibility.
-- Scoped admin v2 extends role model:
+- Local + LDAP auth with runtime auth mode (`local` / `ldap` / `hybrid`).
+- Session cookie auth with CSRF on mutating routes.
+- Authorization is app-native RBAC + per-bucket grants.
+- Bucket visibility requires explicit `bucket:list` permission.
+- Scoped admin v2:
   - `SUPER_ADMIN`: global
-  - `ADMIN`: operationally scoped to assigned buckets for grant and operational views
+  - `ADMIN`: constrained by optional admin-bucket scopes for operational/grant actions
   - `USER`: explicit per-bucket grants only
 
-## Stage 3 Job System
+## Jobs and Timeline Model
 
-Persistent job table (`jobs`) with:
+## Persistent job state
+
+`jobs` table persists:
 
 - `type`: `FOLDER_RENAME`, `FOLDER_DELETE`, `BUCKET_SYNC`, `UPLOAD_CLEANUP`
 - `status`: `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELED`
-- actor (`createdByUserId`)
-- payload/progress/result/failure summary
+- actor and timing metadata
+- progress/result/failure summaries
 - cancellation metadata
-- lock metadata (`lockKey`, `lockedAt`)
+- `correlationId` for cross-runtime tracing
 
-Execution model:
+## Event timeline
 
-- API enqueues jobs.
-- Worker polls and claims jobs.
-- Claiming uses DB state transition and Redis lock.
-- Stale-running jobs are reclaimable after lock TTL.
-- Cancel is best-effort (checked between units of work).
+`job_events` table stores structured lifecycle and domain-step history:
 
-## Redis Usage
+- core events: `created`, `claimed`, `started`, `progress`, `canceled_requested`, `canceled`, `failed`, `completed`
+- domain events: e.g. `folder_rename.started`, `bucket_sync.progress`, `upload_cleanup.item_processed`
+- event fields: `jobId`, `createdAt`, `level`, `type`, `message`, `metadata`, optional `correlationId`
 
-1. Login throttling:
-   - distributed key window (`login:<ip>:<username>`)
-2. Job coordination:
-   - lock key (`job:lock:<jobId>`) via `SET NX EX`
+This is intentionally eventful but bounded; events are meaningful operator diagnostics, not a raw per-object firehose.
 
-If Redis is disabled in local/test, process-local fallback is used for developer convenience.
+## Worker Execution and Cancellation
 
-## File and Upload Architecture
+- Worker claims queued jobs with DB transition + Redis lock.
+- Jobs are restart-safe at job-level (reclaimable if stale lock).
+- Cancellation is best-effort:
+  - cancel request is persisted,
+  - worker checks cancellation between steps/batches,
+  - in-flight S3 operations may complete before stop.
+- Timeline events explicitly capture cancellation request/observation behavior.
 
-### File ops
+## Multipart Upload Durability
 
-- S3 folders are virtual.
-- Folder rename/delete operations are async background jobs.
-- File rename/delete remain direct.
+`upload_sessions` persists multipart state including:
 
-### Multipart durability
-
-`upload_sessions` now stores:
-
-- `partSize`, `totalParts`, `fileSize`, `contentType`, `relativePath`
-- `completedParts` (partNumber + eTag)
-- `lastActivityAt`, `expiresAt`
+- upload id/session id
+- part sizing and totals
+- completed parts
+- relative path for folder uploads
+- expiry and last activity metadata
 
 Resume flow:
 
-1. client asks `/files/multipart/recover`
-2. server returns recoverable session + completed parts
-3. client uploads only missing parts
-4. client records per-part completion (`part-complete`)
-5. client completes multipart with merged parts
+1. client attempts recover by file key/size/content-type
+2. server returns existing active session + completed parts (if available)
+3. client uploads missing parts only
+4. client marks part completion
+5. client completes upload
+
+## Redis Usage
+
+1. Distributed login throttling
+2. Job locking (`SET NX EX`) and coordination
+
+Redis can be disabled in local-only paths, but production should keep it enabled for multi-instance correctness.
 
 ## Observability
 
-Public operational endpoints:
+## Metrics
+
+- `GET /metrics` (Prometheus)
+- includes login, upload, job, S3 failure, LDAP failure metrics
+
+## Health
 
 - `GET /health/live`
 - `GET /health/ready`
-- `GET /metrics`
 
-Prometheus metrics include:
+## Correlation and traces
 
-- login success/failure + latency
-- upload lifecycle events
-- job lifecycle events
-- S3 failures and latencies
-- LDAP auth failures
+- API assigns correlation/request ID (`x-request-id` by default).
+- Correlation ID flows into:
+  - request context,
+  - structured logs,
+  - audit metadata context,
+  - jobs + job events,
+  - worker execution context,
+  - Garage Admin/S3 operation context where instrumented.
+- OpenTelemetry SDK is integrated (OTLP exporter configurable by env).
 
-## Admin Surface
+## Integration Lane Architecture
 
-Admin UI now includes:
+`docker-compose.integration.yml` runs:
 
-- background job table (status/progress/failure/cancel)
-- upload session visibility
-- scoped admin assignment (super-admin only)
-- existing Stage 2 controls (users, grants, LDAP, auth mode, connections, audit)
+- Postgres
+- Redis
+- Garage v2.2.0
+- API
+- Worker
+- Web
 
-## Testing Lanes
-
-Fast lane:
-
-- workspace unit/service tests
-- lightweight Playwright smoke tests (`test/e2e`)
-
-Full integration lane:
-
-- `docker-compose.integration.yml` (Postgres, Redis, Garage, API, Worker, Web)
-- integration Playwright suite (`test/e2e-integration`) behind `INTEGRATION_E2E=1`
+Bootstrap script (`scripts/integration-bootstrap.mjs`) makes integration deterministic by initializing Garage layout/key/bucket/alias, verifying app connectivity, and running bucket sync.
 
 ## Honest Boundaries
 
-- Folder job execution is durable and restart-safe but not per-object checkpoint-resumable mid-run.
-- Cancel requests are best-effort for in-flight long S3 calls.
-- Full integration upload flows require Garage bootstrap (usable key + bucket alias) in the target environment.
+- No ACL/policy/versioning abstraction is introduced (Garage constraints respected).
+- Rename/delete durability is job-level, not per-object checkpoint resume.
+- Job cancellation remains best-effort for in-flight long operations.

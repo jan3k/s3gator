@@ -154,6 +154,7 @@ export interface AdminClientConfig {
   baseUrl: string;
   token: string;
   timeoutMs?: number;
+  defaultHeaders?: Record<string, string>;
 }
 
 export interface GarageBucketSummary {

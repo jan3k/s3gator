@@ -16,6 +16,14 @@ const envSchema = z.object({
     .transform((value) => (typeof value === "boolean" ? value : value === "true"))
     .default(true),
   REDIS_PREFIX: z.string().default("s3gator"),
+  CORRELATION_HEADER_NAME: z.string().default("x-request-id"),
+  OTEL_ENABLED: z
+    .union([z.boolean(), z.string()])
+    .transform((value) => (typeof value === "boolean" ? value : value === "true"))
+    .default(false),
+  OTEL_SERVICE_NAME: z.string().default("s3gator-api"),
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
+  OTEL_EXPORTER_OTLP_HEADERS: z.string().optional(),
   JOB_WORKER_INLINE: z
     .union([z.boolean(), z.string()])
     .transform((value) => (typeof value === "boolean" ? value : value === "true"))

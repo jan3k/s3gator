@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16.9-alpine
@@ -36,13 +34,18 @@ services:
     image: dxflrs/garage:v2.2.0
     container_name: s3gator-int-garage
     restart: unless-stopped
-    command: ["server", "-c", "/etc/garage/config.toml"]
+    command: ["/garage", "-c", "/etc/garage/config.toml", "server"]
     ports:
       - "3900:3900"
       - "3903:3903"
     volumes:
       - ./docker/garage/config.toml:/etc/garage/config.toml:ro
       - s3gator-int-garage:/var/lib/garage
+    healthcheck:
+      test: ["CMD", "/garage", "-c", "/etc/garage/config.toml", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   api:
     build:
@@ -70,6 +73,9 @@ services:
       REDIS_URL: redis://redis:6379
       REDIS_ENABLED: "true"
       REDIS_PREFIX: s3gator
+      CORRELATION_HEADER_NAME: x-request-id
+      OTEL_ENABLED: "false"
+      OTEL_SERVICE_NAME: s3gator-api-integration
       JOB_WORKER_INLINE: "false"
       JOB_WORKER_POLL_MS: 2000
       JOB_LOCK_TTL_SECONDS: 60
@@ -82,10 +88,10 @@ services:
       GARAGE_ENDPOINT: http://garage:3900
       GARAGE_REGION: garage
       GARAGE_FORCE_PATH_STYLE: "true"
-      GARAGE_ACCESS_KEY_ID: integration-access-key
-      GARAGE_SECRET_ACCESS_KEY: integration-secret-key
+      GARAGE_ACCESS_KEY_ID: ${INTEGRATION_GARAGE_ACCESS_KEY_ID:-GK111111111111111111111111}
+      GARAGE_SECRET_ACCESS_KEY: ${INTEGRATION_GARAGE_SECRET_ACCESS_KEY:-1111111111111111111111111111111111111111111111111111111111111111}
       GARAGE_ADMIN_API_URL: http://garage:3903
-      GARAGE_ADMIN_TOKEN: stage3-dev-admin-token-change-me
+      GARAGE_ADMIN_TOKEN: ${INTEGRATION_GARAGE_ADMIN_TOKEN:-stage4-dev-admin-token-change-me}
     ports:
       - "4000:4000"
     command: >-
@@ -120,6 +126,9 @@ services:
       REDIS_URL: redis://redis:6379
       REDIS_ENABLED: "true"
       REDIS_PREFIX: s3gator
+      CORRELATION_HEADER_NAME: x-request-id
+      OTEL_ENABLED: "false"
+      OTEL_SERVICE_NAME: s3gator-worker-integration
       JOB_WORKER_INLINE: "false"
       JOB_WORKER_POLL_MS: 2000
       JOB_LOCK_TTL_SECONDS: 60
@@ -127,12 +136,13 @@ services:
       GARAGE_ENDPOINT: http://garage:3900
       GARAGE_REGION: garage
       GARAGE_FORCE_PATH_STYLE: "true"
-      GARAGE_ACCESS_KEY_ID: integration-access-key
-      GARAGE_SECRET_ACCESS_KEY: integration-secret-key
+      GARAGE_ACCESS_KEY_ID: ${INTEGRATION_GARAGE_ACCESS_KEY_ID:-GK111111111111111111111111}
+      GARAGE_SECRET_ACCESS_KEY: ${INTEGRATION_GARAGE_SECRET_ACCESS_KEY:-1111111111111111111111111111111111111111111111111111111111111111}
       GARAGE_ADMIN_API_URL: http://garage:3903
-      GARAGE_ADMIN_TOKEN: stage3-dev-admin-token-change-me
+      GARAGE_ADMIN_TOKEN: ${INTEGRATION_GARAGE_ADMIN_TOKEN:-stage4-dev-admin-token-change-me}
     command: >-
       sh -lc "
+      npx pnpm db:generate &&
       npx pnpm --filter @s3gator/shared build &&
       npx pnpm --filter @s3gator/s3 build &&
       npx pnpm --filter @s3gator/api build &&
@@ -149,7 +159,7 @@ services:
       api:
         condition: service_healthy
     environment:
-      NEXT_PUBLIC_API_BASE_URL: http://localhost:4000
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:4000
     ports:
       - "3000:3000"
     command: >-

@@ -1,12 +1,14 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { ListBucketsCommand } from "@aws-sdk/client-s3";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { GarageConnection } from "@prisma/client";
 import { createGarageS3Client, GarageAdminApiV2Client } from "@s3gator/s3";
 import type { GarageConnectionPublic, SessionUser } from "@s3gator/shared";
 import { PrismaService } from "@/prisma/prisma.service.js";
 import { CryptoService } from "@/common/crypto.service.js";
 import { AuditService } from "@/audit/audit.service.js";
+import { getCorrelationId } from "@/common/request-context.js";
 
 interface UpsertConnectionInput {
   name: string;
@@ -22,6 +24,8 @@ interface UpsertConnectionInput {
 
 @Injectable()
 export class ConnectionsService {
+  private readonly tracer = trace.getTracer("s3gator.api.connections");
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly cryptoService: CryptoService,
@@ -167,6 +171,15 @@ export class ConnectionsService {
       throw new NotFoundException("Connection not found");
     }
 
+    const correlationId = getCorrelationId();
+    const span = this.tracer.startSpan("connections.health_check", {
+      attributes: {
+        "connection.id": id,
+        "connection.name": item.name,
+        "connection.endpoint": item.endpoint
+      }
+    });
+
     const s3 = createGarageS3Client({
       endpoint: item.endpoint,
       region: item.region,
@@ -182,20 +195,31 @@ export class ConnectionsService {
     try {
       await s3.send(new ListBucketsCommand({}));
       s3Ok = true;
+      span.setAttribute("garage.s3.list_buckets.ok", true);
     } catch (err) {
       error = (err as Error).message;
+      span.setAttribute("garage.s3.list_buckets.ok", false);
+      span.recordException(err as Error);
     }
 
     if (item.adminApiUrl && item.adminTokenEncrypted) {
       try {
         const adminClient = new GarageAdminApiV2Client({
           baseUrl: item.adminApiUrl,
-          token: this.cryptoService.decrypt(item.adminTokenEncrypted)
+          token: this.cryptoService.decrypt(item.adminTokenEncrypted),
+          defaultHeaders: correlationId
+            ? {
+                "x-request-id": correlationId
+              }
+            : undefined
         });
         adminOk = await adminClient.healthCheck();
+        span.setAttribute("garage.admin.health.ok", adminOk);
       } catch (err) {
         adminOk = false;
         error = error ?? (err as Error).message;
+        span.setAttribute("garage.admin.health.ok", false);
+        span.recordException(err as Error);
       }
     }
 
@@ -219,6 +243,12 @@ export class ConnectionsService {
       },
       ipAddress
     });
+
+    span.setStatus({
+      code: s3Ok && (adminOk === null || adminOk) ? SpanStatusCode.OK : SpanStatusCode.ERROR,
+      message: error ?? undefined
+    });
+    span.end();
 
     return {
       id: item.id,

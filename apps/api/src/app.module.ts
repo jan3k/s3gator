@@ -16,9 +16,9 @@ import { UsersModule } from "@/users/users.module.js";
 import { SettingsModule } from "@/settings/settings.module.js";
 import { AuditModule } from "@/audit/audit.module.js";
 import { HealthModule } from "@/health/health.module.js";
+import { CommonModule } from "@/common/common.module.js";
 import { AppController } from "./app.controller.js";
 import { loadEnv } from "@/common/env.js";
-import { CryptoService } from "@/common/crypto.service.js";
 
 @Module({
   imports: [
@@ -29,6 +29,7 @@ import { CryptoService } from "@/common/crypto.service.js";
     PrismaModule,
     RedisModule,
     MetricsModule,
+    CommonModule,
     AuthModule,
     AuthorizationModule,
     ConnectionsModule,
@@ -42,7 +43,6 @@ import { CryptoService } from "@/common/crypto.service.js";
   ],
   controllers: [AppController],
   providers: [
-    CryptoService,
     {
       provide: APP_GUARD,
       useClass: SessionAuthGuard

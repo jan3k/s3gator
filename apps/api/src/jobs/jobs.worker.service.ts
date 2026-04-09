@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { z } from "zod";
 import {
   createGarageS3Client,
@@ -13,6 +14,7 @@ import { PrismaService } from "@/prisma/prisma.service.js";
 import { AuditService } from "@/audit/audit.service.js";
 import { ConnectionsService } from "@/connections/connections.service.js";
 import { MetricsService } from "@/metrics/metrics.service.js";
+import { runWithRequestContext } from "@/common/request-context.js";
 import { JobsService } from "./jobs.service.js";
 
 const actorSchema = z.object({
@@ -28,24 +30,28 @@ const folderRenamePayloadSchema = z.object({
   bucket: z.string().min(1),
   oldKey: z.string().min(1),
   newKey: z.string().min(1),
-  ipAddress: z.string().optional()
+  ipAddress: z.string().optional(),
+  correlationId: z.string().optional()
 });
 
 const folderDeletePayloadSchema = z.object({
   actor: actorSchema,
   bucket: z.string().min(1),
   key: z.string().min(1),
-  ipAddress: z.string().optional()
+  ipAddress: z.string().optional(),
+  correlationId: z.string().optional()
 });
 
 const bucketSyncPayloadSchema = z.object({
   actor: actorSchema,
-  ipAddress: z.string().optional()
+  ipAddress: z.string().optional(),
+  correlationId: z.string().optional()
 });
 
 const uploadCleanupPayloadSchema = z.object({
   actor: actorSchema,
-  reason: z.enum(["manual", "scheduled"])
+  reason: z.enum(["manual", "scheduled"]),
+  correlationId: z.string().optional()
 });
 
 class JobCanceledError extends Error {
@@ -58,6 +64,7 @@ class JobCanceledError extends Error {
 @Injectable()
 export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(JobsWorkerService.name);
+  private readonly tracer = trace.getTracer("s3gator.api.jobs.worker");
   private readonly workerId = `worker-${process.pid}`;
   private readonly pollMs: number;
   private readonly lockTtlSeconds: number;
@@ -130,8 +137,20 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      this.metricsService.recordJobEvent(job.type, "start");
-      await this.execute(job);
+      const correlationId = job.correlationId ?? `job-${job.id}`;
+      await runWithRequestContext(
+        {
+          requestId: correlationId,
+          correlationId,
+          source: "worker",
+          jobId: job.id,
+          userId: job.createdByUserId ?? undefined
+        },
+        async () => {
+          this.metricsService.recordJobEvent(job.type, "start");
+          await this.execute(job, correlationId);
+        }
+      );
     } catch (error) {
       this.logger.error(`Worker tick failure: ${(error as Error).message}`);
     } finally {
@@ -139,45 +158,93 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async execute(job: Job): Promise<void> {
-    const canceledBeforeStart = await this.jobsService.isCancelRequested(job.id);
-    if (canceledBeforeStart) {
-      await this.jobsService.markCanceled(job.id);
-      return;
-    }
+  private async execute(job: Job, correlationId: string): Promise<void> {
+    const span = this.tracer.startSpan("jobs.execute", {
+      attributes: {
+        "job.id": job.id,
+        "job.type": job.type,
+        "job.correlation_id": correlationId,
+        "worker.id": this.workerId
+      }
+    });
 
     try {
+      const canceledBeforeStart = await this.jobsService.isCancelRequested(job.id);
+      if (canceledBeforeStart) {
+        await this.jobsService.recordEvent(job.id, {
+          type: "cancel_observed",
+          level: "WARN",
+          message: "Cancel request observed before job execution started.",
+          metadata: {
+            checkpoint: "before_start",
+            bestEffort: true
+          }
+        });
+        await this.jobsService.markCanceled(job.id);
+        span.setStatus({ code: SpanStatusCode.OK });
+        return;
+      }
+
       let result: Record<string, unknown>;
 
       if (job.type === "FOLDER_RENAME") {
-        result = await this.executeFolderRename(job);
+        result = await this.executeFolderRename(job, correlationId);
       } else if (job.type === "FOLDER_DELETE") {
-        result = await this.executeFolderDelete(job);
+        result = await this.executeFolderDelete(job, correlationId);
       } else if (job.type === "BUCKET_SYNC") {
-        result = await this.executeBucketSync(job);
+        result = await this.executeBucketSync(job, correlationId);
       } else {
         result = await this.executeUploadCleanup(job);
       }
 
       await this.jobsService.markCompleted(job.id, result);
+      span.setStatus({ code: SpanStatusCode.OK });
     } catch (error) {
       if (error instanceof JobCanceledError) {
         await this.jobsService.markCanceled(job.id);
-        return;
+        span.setStatus({ code: SpanStatusCode.OK });
+      } else {
+        const message = (error as Error).message;
+        await this.jobsService.recordEvent(job.id, {
+          type: "step_error",
+          level: "ERROR",
+          message: "Job step failed.",
+          metadata: {
+            error: message
+          }
+        });
+        await this.jobsService.markFailed(job.id, message);
+        span.recordException(error as Error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message });
       }
-      await this.jobsService.markFailed(job.id, (error as Error).message);
+    } finally {
+      span.end();
     }
   }
 
-  private async executeFolderRename(job: Job): Promise<Record<string, unknown>> {
+  private async executeFolderRename(job: Job, correlationId: string): Promise<Record<string, unknown>> {
     const payload = folderRenamePayloadSchema.parse(job.payload);
     const actor = payload.actor satisfies SessionUser;
 
+    await this.jobsService.recordEvent(job.id, {
+      type: "folder_rename.started",
+      message: "Folder rename started.",
+      metadata: {
+        bucket: payload.bucket,
+        oldKey: payload.oldKey,
+        newKey: payload.newKey
+      }
+    });
+
     const s3 = await this.getS3Client();
     const startedAt = Date.now();
-    await this.throwIfCancelRequested(job.id);
+
+    let lastProgressEventAt = 0;
+    let lastProcessedForEvent = 0;
+
+    await this.throwIfCancelRequested(job.id, "before_rename_start");
     const renameResult = await renameFileOrFolder(s3, payload.oldKey, payload.newKey, payload.bucket, (progress) => {
-      void this.jobsService.markProgress(job.id, {
+      const progressPayload = {
         totalItems: progress.total,
         processedItems: progress.processed,
         metadata: {
@@ -186,14 +253,41 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
           failed: progress.failed,
           currentKey: progress.currentKey ?? null
         }
+      };
+
+      const now = Date.now();
+      const emitEvent =
+        progress.processed === progress.total ||
+        progress.processed - lastProcessedForEvent >= Math.max(1, Math.ceil(Math.max(progress.total, 1) / 20)) ||
+        now - lastProgressEventAt >= 5000;
+
+      if (emitEvent) {
+        lastProcessedForEvent = progress.processed;
+        lastProgressEventAt = now;
+      }
+
+      void this.jobsService.markProgress(job.id, progressPayload, {
+        emitEvent,
+        message: "Folder rename progress updated."
       });
     });
-    await this.throwIfCancelRequested(job.id);
+    await this.throwIfCancelRequested(job.id, "after_rename_end");
 
     this.metricsService.recordS3Duration("folder_rename", (Date.now() - startedAt) / 1000);
     if (renameResult.failed.length > 0) {
       this.metricsService.recordS3Failure("folder_rename");
     }
+
+    await this.jobsService.recordEvent(job.id, {
+      type: "folder_rename.completed_step",
+      level: renameResult.failed.length > 0 ? "WARN" : "INFO",
+      message: "Folder rename step completed.",
+      metadata: {
+        copied: renameResult.copied,
+        deleted: renameResult.deleted,
+        failed: renameResult.failed.length
+      }
+    });
 
     await this.auditService.record({
       actor,
@@ -203,6 +297,7 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
       metadata: {
         mode: "job",
         jobId: job.id,
+        correlationId,
         result: renameResult
       },
       ipAddress: payload.ipAddress
@@ -214,30 +309,63 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private async executeFolderDelete(job: Job): Promise<Record<string, unknown>> {
+  private async executeFolderDelete(job: Job, correlationId: string): Promise<Record<string, unknown>> {
     const payload = folderDeletePayloadSchema.parse(job.payload);
     const actor = payload.actor satisfies SessionUser;
 
-    await this.jobsService.markProgress(job.id, {
+    await this.jobsService.recordEvent(job.id, {
+      type: "folder_delete.started",
+      message: "Folder delete started.",
       metadata: {
-        stage: "deleting"
+        bucket: payload.bucket,
+        key: payload.key
       }
     });
 
+    await this.jobsService.markProgress(
+      job.id,
+      {
+        metadata: {
+          stage: "deleting"
+        }
+      },
+      {
+        emitEvent: true,
+        message: "Folder delete started."
+      }
+    );
+
     const s3 = await this.getS3Client();
     const startedAt = Date.now();
-    await this.throwIfCancelRequested(job.id);
+    await this.throwIfCancelRequested(job.id, "before_delete_start");
     const deleteResult = await deleteFileOrFolder(s3, payload.key, payload.bucket);
-    await this.throwIfCancelRequested(job.id);
+    await this.throwIfCancelRequested(job.id, "after_delete_end");
 
     this.metricsService.recordS3Duration("folder_delete", (Date.now() - startedAt) / 1000);
     if (deleteResult.failed.length > 0) {
       this.metricsService.recordS3Failure("folder_delete");
     }
 
-    await this.jobsService.markProgress(job.id, {
-      totalItems: deleteResult.deleted + deleteResult.failed.length,
-      processedItems: deleteResult.deleted + deleteResult.failed.length,
+    await this.jobsService.markProgress(
+      job.id,
+      {
+        totalItems: deleteResult.deleted + deleteResult.failed.length,
+        processedItems: deleteResult.deleted + deleteResult.failed.length,
+        metadata: {
+          deleted: deleteResult.deleted,
+          failed: deleteResult.failed.length
+        }
+      },
+      {
+        emitEvent: true,
+        message: "Folder delete step completed."
+      }
+    );
+
+    await this.jobsService.recordEvent(job.id, {
+      type: "folder_delete.completed_step",
+      level: deleteResult.failed.length > 0 ? "WARN" : "INFO",
+      message: "Folder delete step completed.",
       metadata: {
         deleted: deleteResult.deleted,
         failed: deleteResult.failed.length
@@ -252,6 +380,7 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
       metadata: {
         mode: "job",
         jobId: job.id,
+        correlationId,
         result: deleteResult
       },
       ipAddress: payload.ipAddress
@@ -263,9 +392,17 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private async executeBucketSync(job: Job): Promise<Record<string, unknown>> {
+  private async executeBucketSync(job: Job, correlationId: string): Promise<Record<string, unknown>> {
     const payload = bucketSyncPayloadSchema.parse(job.payload);
     const actor = payload.actor satisfies SessionUser;
+
+    await this.jobsService.recordEvent(job.id, {
+      type: "bucket_sync.started",
+      message: "Bucket sync started.",
+      metadata: {
+        actorUserId: actor.id
+      }
+    });
 
     const conn = await this.connectionsService.getDefaultConnectionWithSecrets();
     if (!conn.adminApiUrl || !conn.adminToken) {
@@ -274,14 +411,19 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
 
     const adminClient = new GarageAdminApiV2Client({
       baseUrl: conn.adminApiUrl,
-      token: conn.adminToken
+      token: conn.adminToken,
+      defaultHeaders: {
+        "x-request-id": correlationId
+      }
     });
 
     const remoteBuckets = await adminClient.listBuckets();
 
     let processed = 0;
+    let lastProgressEventAt = 0;
+
     for (const bucket of remoteBuckets) {
-      await this.throwIfCancelRequested(job.id);
+      await this.throwIfCancelRequested(job.id, "bucket_sync_loop");
 
       const preferredName = bucket.globalAliases[0] ?? bucket.id;
       await this.prisma.bucket.upsert({
@@ -298,11 +440,40 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
       });
       processed += 1;
 
-      await this.jobsService.markProgress(job.id, {
-        totalItems: remoteBuckets.length,
-        processedItems: processed
-      });
+      const now = Date.now();
+      const emitEvent =
+        processed === remoteBuckets.length ||
+        processed % Math.max(1, Math.ceil(Math.max(remoteBuckets.length, 1) / 10)) === 0 ||
+        now - lastProgressEventAt >= 5000;
+
+      if (emitEvent) {
+        lastProgressEventAt = now;
+      }
+
+      await this.jobsService.markProgress(
+        job.id,
+        {
+          totalItems: remoteBuckets.length,
+          processedItems: processed,
+          metadata: {
+            lastBucket: preferredName
+          }
+        },
+        {
+          emitEvent,
+          message: "Bucket sync progress updated."
+        }
+      );
     }
+
+    await this.jobsService.recordEvent(job.id, {
+      type: "bucket_sync.completed_step",
+      message: "Bucket sync step completed.",
+      metadata: {
+        synced: remoteBuckets.length,
+        connectionId: conn.id
+      }
+    });
 
     await this.auditService.record({
       actor,
@@ -311,6 +482,7 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
       metadata: {
         mode: "job",
         jobId: job.id,
+        correlationId,
         synced: remoteBuckets.length,
         connectionId: conn.id
       },
@@ -326,6 +498,15 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
 
   private async executeUploadCleanup(job: Job): Promise<Record<string, unknown>> {
     const payload = uploadCleanupPayloadSchema.parse(job.payload);
+
+    await this.jobsService.recordEvent(job.id, {
+      type: "upload_cleanup.started",
+      message: "Upload cleanup started.",
+      metadata: {
+        reason: payload.reason,
+        batchSize: this.cleanupBatchSize
+      }
+    });
 
     const expired = await this.prisma.uploadSession.findMany({
       where: {
@@ -346,15 +527,22 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
 
     for (const session of expired) {
       try {
-        await this.throwIfCancelRequested(job.id);
+        await this.throwIfCancelRequested(job.id, "upload_cleanup_loop");
 
-        await this.jobsService.markProgress(job.id, {
-          totalItems: expired.length,
-          processedItems: processed,
-          metadata: {
-            currentUploadSessionId: session.id
+        await this.jobsService.markProgress(
+          job.id,
+          {
+            totalItems: expired.length,
+            processedItems: processed,
+            metadata: {
+              currentUploadSessionId: session.id
+            }
+          },
+          {
+            emitEvent: processed === 0 || processed === expired.length - 1 || processed % 10 === 0,
+            message: "Upload cleanup progress updated."
           }
-        });
+        );
 
         await this.prisma.uploadSession.update({
           where: { id: session.id },
@@ -362,6 +550,16 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
             status: "FAILED",
             error: "Upload session expired",
             lastActivityAt: new Date()
+          }
+        });
+
+        await this.jobsService.recordEvent(job.id, {
+          type: "upload_cleanup.item_processed",
+          message: "Expired upload session marked as failed.",
+          metadata: {
+            uploadSessionId: session.id,
+            bucket: session.bucket?.name ?? null,
+            objectKey: session.objectKey
           }
         });
 
@@ -381,11 +579,29 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
         }
       } catch (error) {
         this.metricsService.recordS3Failure("upload_cleanup");
+        await this.jobsService.recordEvent(job.id, {
+          type: "upload_cleanup.item_failed",
+          level: "WARN",
+          message: "Upload cleanup failed for session.",
+          metadata: {
+            uploadSessionId: session.id,
+            error: (error as Error).message
+          }
+        });
         this.logger.warn(`Upload cleanup failed for session ${session.id}: ${(error as Error).message}`);
       }
 
       processed += 1;
     }
+
+    await this.jobsService.recordEvent(job.id, {
+      type: "upload_cleanup.completed_step",
+      message: "Upload cleanup completed.",
+      metadata: {
+        cleaned: processed,
+        totalExpired: expired.length
+      }
+    });
 
     return {
       cleaned: processed,
@@ -404,8 +620,17 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async throwIfCancelRequested(jobId: string): Promise<void> {
+  private async throwIfCancelRequested(jobId: string, checkpoint: string): Promise<void> {
     if (await this.jobsService.isCancelRequested(jobId)) {
+      await this.jobsService.recordEvent(jobId, {
+        type: "cancel_observed",
+        level: "WARN",
+        message: "Cancel request observed at worker checkpoint.",
+        metadata: {
+          checkpoint,
+          bestEffort: true
+        }
+      });
       throw new JobCanceledError();
     }
   }

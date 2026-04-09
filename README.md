@@ -2,14 +2,14 @@
 
 Production-oriented S3 Storage Manager for **Garage v2.2.0**, built with **Node.js + TypeScript**.
 
-It provides a secure, server-backed file manager with local/LDAP login, RBAC + per-bucket permissions, multipart upload, preview/download flows, and admin/audit operations.
+It provides a secure, server-backed file manager with local/LDAP login, RBAC + per-bucket permissions, resumable multipart uploads, background jobs, and operator-grade audit/telemetry capabilities.
 
 ## Garage Compatibility Scope
 
 S3Gator intentionally follows Garage realities:
 
 - Garage Admin API **v2** with bearer token auth.
-- S3 access via AWS SDK v3 against a configurable endpoint/region/path-style mode.
+- S3 access via AWS SDK v3 against configurable endpoint/region/path-style mode.
 - No ACL/policy-driven authorization in the app.
 - No object versioning feature surface.
 
@@ -24,57 +24,48 @@ S3Gator intentionally follows Garage realities:
 ## Key Features
 
 - Local auth (Argon2id) and LDAP auth.
-- Runtime auth mode enforcement: `local`, `ldap`, or `hybrid`.
+- Runtime auth mode enforcement: `local`, `ldap`, `hybrid`.
 - Cookie session auth with CSRF protection.
 - Redis-backed distributed login throttling.
 - Role model: `SUPER_ADMIN`, `ADMIN`, `USER`.
-- Server-side user-management policy hardening:
-  - only `SUPER_ADMIN` can assign/remove `SUPER_ADMIN`,
-  - `ADMIN` can manage only `USER` accounts.
-- Scoped admin v2:
-  - optional `ADMIN` bucket scopes for grant and operational visibility actions,
-  - `SUPER_ADMIN` remains global bypass.
-- Per-bucket capability grants (e.g. `object:read`, `object:upload`, `folder:delete`, `search:run`).
-- Bucket visibility requires explicit `bucket:list`.
-- Bucket browsing, search, folder operations, rename/delete, stats.
-- Upload center with multipart upload orchestration, retry, cancel, and persisted resume metadata.
-- Background jobs (DB-persisted) for heavy operations:
+- Scoped admin v2 with optional bucket scope constraints for `ADMIN` users.
+- Per-bucket capability grants with explicit `bucket:list` visibility.
+- Background jobs for heavy operations:
   - folder rename,
   - folder delete,
   - Garage bucket sync,
   - stale multipart cleanup.
-- Presigned URL-based preview/download.
-- Operational endpoints:
-  - `GET /health/live`
-  - `GET /health/ready`
-  - `GET /metrics` (Prometheus format)
-- Admin panel:
+- Persistent job timeline events (`job_events`) with structured metadata.
+- Resumable multipart upload sessions with persisted part state.
+- Prometheus metrics + health endpoints.
+- Correlation IDs + OpenTelemetry hooks for API and worker paths.
+- Admin panel with:
   - users/roles,
-  - bucket grants,
-  - admin scopes,
-  - LDAP config,
-  - Garage connection management + health checks,
-  - background jobs + upload session visibility,
+  - bucket grants/scopes,
+  - LDAP and auth mode settings,
+  - connection health,
+  - jobs timeline view,
+  - upload session visibility,
   - audit logs.
 
 ## Security Highlights
 
-- Garage credentials/admin token are backend-only.
-- Secrets stored in DB are encrypted (AES-256-GCM) using `APP_ENCRYPTION_KEY`.
-- Login endpoints are Redis-backed rate-limited for multi-instance deployments.
-- API response shaping avoids encrypted ciphertext leakage for admin settings/connections.
-- Structured logging and audit metadata redaction for sensitive fields.
-- Audit trail for auth, privileged settings, grant changes, and destructive operations.
+- Garage credentials/admin tokens are backend-only.
+- Secrets at rest are encrypted (AES-256-GCM via `APP_ENCRYPTION_KEY`).
+- API responses never expose encrypted secret columns.
+- Distributed login rate limiting via Redis.
+- Redaction in logs and audit metadata for password/secret/token fields.
+- Audit trail for auth/admin/destructive and job lifecycle events.
 
-See [docs/security.md](docs/security.md) for full details.
+See [docs/security.md](docs/security.md) for details.
 
 ## Prerequisites
 
 - Node.js 22+
 - pnpm 9+
-- Docker + Docker Compose (for local PostgreSQL + Redis)
+- Docker + Docker Compose (for local/integration dependencies)
 
-## Quick Start
+## Quick Start (Local Dev)
 
 1. Prepare environment:
 
@@ -102,17 +93,6 @@ npx pnpm dev:worker
 - API health: `http://localhost:4000/health/live`
 - API metrics: `http://localhost:4000/metrics`
 
-## Manual Commands
-
-```bash
-npx pnpm install
-npx pnpm db:generate
-npx pnpm db:migrate
-npx pnpm db:seed
-npx pnpm dev
-npx pnpm dev:worker
-```
-
 ## Test and Build
 
 ```bash
@@ -120,35 +100,30 @@ npx pnpm lint
 npx pnpm typecheck
 npx pnpm test
 npx pnpm test:e2e
-npx pnpm test:e2e:integration
 npx pnpm build
 ```
 
-## Integration Stack (Full Lane)
+## Full Integration Lane (Garage + Redis + DB + API + Worker + Web)
 
-Bring up full local integration dependencies:
+Start stack and run deterministic Garage/app bootstrap:
 
 ```bash
 npx pnpm integration:up
 ```
 
-This starts:
-- PostgreSQL
-- Redis
-- Garage v2.2.0
-- API
-- Worker
-- Web
-
-Run full integration Playwright lane:
+Run full backend-integrated Playwright lane:
 
 ```bash
-INTEGRATION_E2E=1 \
-INTEGRATION_BUCKET_NAME=<existing-garage-bucket-alias> \
-npx pnpm test:e2e:integration
+npx pnpm integration:test
 ```
 
-Tear down:
+Re-run bootstrap only:
+
+```bash
+npx pnpm integration:bootstrap
+```
+
+Tear down integration stack:
 
 ```bash
 npx pnpm integration:down
@@ -162,18 +137,23 @@ Seed values are controlled by environment variables:
 - `DEFAULT_SUPER_ADMIN_PASSWORD`
 - `DEFAULT_SUPER_ADMIN_EMAIL`
 
-Default values are in `.env.example` and should be changed immediately.
+Change defaults immediately outside local development.
 
 ## Docs
 
 - [docs/discovery.md](docs/discovery.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/security.md](docs/security.md)
-- [docs/stage3-plan.md](docs/stage3-plan.md)
 - [docs/operations.md](docs/operations.md)
+- [docs/garage-bootstrap.md](docs/garage-bootstrap.md)
+- [docs/integration-testing.md](docs/integration-testing.md)
+- [docs/telemetry.md](docs/telemetry.md)
+- [docs/stage2-hardening-plan.md](docs/stage2-hardening-plan.md)
+- [docs/stage3-plan.md](docs/stage3-plan.md)
+- [docs/stage4-plan.md](docs/stage4-plan.md)
 
 ## Known Limitations
 
-- Folder rename/delete are job-backed and restart-safe, but do not persist per-object checkpoints for mid-job resume.
-- Cancel requests are best-effort for long S3 operations already in-flight.
-- Full integration E2E lane assumes Garage is initialized with usable S3 credentials and at least one test bucket alias.
+- Folder rename/delete jobs are durable and restart-safe, but there is no per-object checkpoint resume inside a running rename/delete operation.
+- Job cancel is best-effort and may wait for in-flight S3 calls to finish before stopping.
+- Garage bootstrap automation is designed for dev/integration/CI environments and should not be used as-is for production secret lifecycle management.

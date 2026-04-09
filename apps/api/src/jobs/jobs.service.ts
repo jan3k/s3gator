@@ -1,10 +1,11 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { JobType, type Job, type Prisma } from "@prisma/client";
-import type { JobPublic, SessionUser } from "@s3gator/shared";
+import { JobEventLevel, JobType, type Job, type JobEvent, type Prisma } from "@prisma/client";
+import type { JobDetailPublic, JobEventPublic, JobPublic, SessionUser } from "@s3gator/shared";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "@/prisma/prisma.service.js";
 import { RedisService } from "@/redis/redis.service.js";
 import { MetricsService } from "@/metrics/metrics.service.js";
+import { getCorrelationId } from "@/common/request-context.js";
 
 export interface FolderRenameJobPayload {
   actor: SessionUser;
@@ -12,6 +13,7 @@ export interface FolderRenameJobPayload {
   oldKey: string;
   newKey: string;
   ipAddress?: string;
+  correlationId?: string;
 }
 
 export interface FolderDeleteJobPayload {
@@ -19,16 +21,27 @@ export interface FolderDeleteJobPayload {
   bucket: string;
   key: string;
   ipAddress?: string;
+  correlationId?: string;
 }
 
 export interface BucketSyncJobPayload {
   actor: SessionUser;
   ipAddress?: string;
+  correlationId?: string;
 }
 
 export interface UploadCleanupJobPayload {
   actor: SessionUser;
   reason: "manual" | "scheduled";
+  correlationId?: string;
+}
+
+interface JobEventInput {
+  type: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+  level?: JobEventLevel;
+  correlationId?: string | null;
 }
 
 @Injectable()
@@ -40,19 +53,19 @@ export class JobsService {
   ) {}
 
   async enqueueFolderRename(payload: FolderRenameJobPayload): Promise<JobPublic> {
-    return this.enqueue("FOLDER_RENAME", payload, payload.actor.id);
+    return this.enqueue("FOLDER_RENAME", payload, payload.actor.id, payload.correlationId);
   }
 
   async enqueueFolderDelete(payload: FolderDeleteJobPayload): Promise<JobPublic> {
-    return this.enqueue("FOLDER_DELETE", payload, payload.actor.id);
+    return this.enqueue("FOLDER_DELETE", payload, payload.actor.id, payload.correlationId);
   }
 
   async enqueueBucketSync(payload: BucketSyncJobPayload): Promise<JobPublic> {
-    return this.enqueue("BUCKET_SYNC", payload, payload.actor.id);
+    return this.enqueue("BUCKET_SYNC", payload, payload.actor.id, payload.correlationId);
   }
 
   async enqueueUploadCleanup(payload: UploadCleanupJobPayload): Promise<JobPublic> {
-    return this.enqueue("UPLOAD_CLEANUP", payload, payload.actor.id);
+    return this.enqueue("UPLOAD_CLEANUP", payload, payload.actor.id, payload.correlationId);
   }
 
   async list(actor: SessionUser, input: { limit?: number; scope?: "mine" | "all" }) {
@@ -99,6 +112,47 @@ export class JobsService {
     return this.toPublic(item);
   }
 
+  async getDetail(actor: SessionUser, jobId: string, eventsLimit = 200): Promise<JobDetailPublic> {
+    const item = await this.prisma.job.findUnique({ where: { id: jobId } });
+    if (!item) {
+      throw new NotFoundException("Job not found");
+    }
+
+    if (!(await this.canView(actor, item))) {
+      throw new ForbiddenException("Not allowed to view this job");
+    }
+
+    const events = await this.prisma.jobEvent.findMany({
+      where: { jobId: item.id },
+      orderBy: { createdAt: "asc" },
+      take: Math.min(Math.max(eventsLimit, 1), 1000)
+    });
+
+    return {
+      job: this.toPublic(item),
+      events: events.map((event) => this.toEventPublic(event))
+    };
+  }
+
+  async listEvents(actor: SessionUser, jobId: string, limit = 200): Promise<JobEventPublic[]> {
+    const item = await this.prisma.job.findUnique({ where: { id: jobId } });
+    if (!item) {
+      throw new NotFoundException("Job not found");
+    }
+
+    if (!(await this.canView(actor, item))) {
+      throw new ForbiddenException("Not allowed to view this job");
+    }
+
+    const events = await this.prisma.jobEvent.findMany({
+      where: { jobId: item.id },
+      orderBy: { createdAt: "asc" },
+      take: Math.min(Math.max(limit, 1), 1000)
+    });
+
+    return events.map((event) => this.toEventPublic(event));
+  }
+
   async requestCancel(actor: SessionUser, jobId: string): Promise<JobPublic> {
     const item = await this.prisma.job.findUnique({ where: { id: jobId } });
     if (!item) {
@@ -121,6 +175,24 @@ export class JobsService {
         }
       });
 
+      await this.createEvent(canceled, {
+        type: "canceled_requested",
+        level: "WARN",
+        message: "Cancellation requested while job was queued.",
+        metadata: {
+          statusAtRequest: item.status,
+          immediateCancel: true
+        }
+      });
+      await this.createEvent(canceled, {
+        type: "canceled",
+        level: "WARN",
+        message: "Job canceled before execution.",
+        metadata: {
+          reason: "cancel_requested_queued"
+        }
+      });
+
       this.metricsService.recordJobEvent(item.type, "cancel");
       await this.releaseJobLock(canceled);
       return this.toPublic(canceled);
@@ -130,6 +202,16 @@ export class JobsService {
       where: { id: item.id },
       data: {
         cancelRequestedAt: now
+      }
+    });
+
+    await this.createEvent(updated, {
+      type: "canceled_requested",
+      level: "WARN",
+      message: "Cancellation requested. Cancel is best-effort and observed at worker checkpoints.",
+      metadata: {
+        statusAtRequest: item.status,
+        bestEffort: true
       }
     });
 
@@ -194,17 +276,50 @@ export class JobsService {
       return null;
     }
 
-    return this.prisma.job.findUnique({ where: { id: candidate.id } });
-  }
+    const claimed = await this.prisma.job.findUnique({ where: { id: candidate.id } });
+    if (!claimed) {
+      return null;
+    }
 
-  async markProgress(jobId: string, progress: Record<string, unknown>): Promise<void> {
-    await this.prisma.job.update({
-      where: { id: jobId },
-      data: {
-        progress: progress as Prisma.InputJsonValue,
-        updatedAt: new Date()
+    await this.createEvent(claimed, {
+      type: "claimed",
+      message: "Job claimed by worker.",
+      metadata: {
+        workerId,
+        reclaimedStaleRun: candidate.status === "RUNNING"
       }
     });
+    await this.createEvent(claimed, {
+      type: "started",
+      message: "Job execution started.",
+      metadata: {
+        workerId
+      }
+    });
+
+    return claimed;
+  }
+
+  async markProgress(
+    jobId: string,
+    progress: Record<string, unknown>,
+    options?: { emitEvent?: boolean; message?: string; level?: JobEventLevel }
+  ): Promise<void> {
+    const updated = await this.prisma.job.update({
+      where: { id: jobId },
+      data: {
+        progress: progress as Prisma.InputJsonValue
+      }
+    });
+
+    if (options?.emitEvent) {
+      await this.createEvent(updated, {
+        type: "progress_update",
+        level: options.level,
+        message: options.message ?? "Job progress updated.",
+        metadata: progress
+      });
+    }
   }
 
   async markCompleted(jobId: string, result?: Record<string, unknown>): Promise<void> {
@@ -225,6 +340,16 @@ export class JobsService {
 
     const durationSeconds = completed.startedAt ? (now.getTime() - completed.startedAt.getTime()) / 1000 : undefined;
     this.metricsService.recordJobEvent(completed.type, "complete", durationSeconds);
+
+    await this.createEvent(completed, {
+      type: "completed",
+      message: "Job completed.",
+      metadata: {
+        durationSeconds,
+        hasResult: result !== undefined
+      }
+    });
+
     await this.releaseJobLock(completed);
   }
 
@@ -246,6 +371,17 @@ export class JobsService {
 
     const durationSeconds = failed.startedAt ? (now.getTime() - failed.startedAt.getTime()) / 1000 : undefined;
     this.metricsService.recordJobEvent(failed.type, "fail", durationSeconds);
+
+    await this.createEvent(failed, {
+      type: "failed",
+      level: "ERROR",
+      message: "Job failed.",
+      metadata: {
+        durationSeconds,
+        error: error.slice(0, 2000)
+      }
+    });
+
     await this.releaseJobLock(failed);
   }
 
@@ -267,6 +403,17 @@ export class JobsService {
 
     const durationSeconds = canceled.startedAt ? (now.getTime() - canceled.startedAt.getTime()) / 1000 : undefined;
     this.metricsService.recordJobEvent(canceled.type, "cancel", durationSeconds);
+
+    await this.createEvent(canceled, {
+      type: "canceled",
+      level: "WARN",
+      message: "Job canceled. In-flight S3 calls may have completed before checkpoint cancellation.",
+      metadata: {
+        durationSeconds,
+        bestEffort: true
+      }
+    });
+
     await this.releaseJobLock(canceled);
   }
 
@@ -279,13 +426,46 @@ export class JobsService {
     return Boolean(item?.cancelRequestedAt);
   }
 
-  private async enqueue(type: JobType, payload: unknown, createdByUserId?: string): Promise<JobPublic> {
+  async recordEvent(jobId: string, input: JobEventInput): Promise<void> {
+    const job = await this.prisma.job.findUnique({
+      where: { id: jobId },
+      select: {
+        id: true,
+        correlationId: true
+      }
+    });
+
+    if (!job) {
+      return;
+    }
+
+    await this.createEvent(job, input);
+  }
+
+  private async enqueue(
+    type: JobType,
+    payload: unknown,
+    createdByUserId?: string,
+    correlationId?: string
+  ): Promise<JobPublic> {
+    const resolvedCorrelationId = correlationId ?? getCorrelationId();
+
     const created = await this.prisma.job.create({
       data: {
         type,
         status: "QUEUED",
+        correlationId: resolvedCorrelationId,
         createdByUserId,
-        payload: payload as Prisma.InputJsonValue
+        payload: sanitizeJobMetadata(payload) as Prisma.InputJsonValue
+      }
+    });
+
+    await this.createEvent(created, {
+      type: "created",
+      message: "Job queued.",
+      metadata: {
+        type: created.type,
+        createdByUserId: created.createdByUserId
       }
     });
 
@@ -361,6 +541,7 @@ export class JobsService {
       id: item.id,
       type: item.type,
       status: item.status,
+      correlationId: item.correlationId ?? null,
       createdByUserId: item.createdByUserId,
       createdAt: item.createdAt.toISOString(),
       startedAt: item.startedAt?.toISOString() ?? null,
@@ -372,6 +553,19 @@ export class JobsService {
     };
   }
 
+  private toEventPublic(item: JobEvent): JobEventPublic {
+    return {
+      id: item.id,
+      jobId: item.jobId,
+      correlationId: item.correlationId ?? null,
+      type: item.type,
+      level: item.level,
+      message: item.message,
+      metadata: (item.metadata as Record<string, unknown> | null) ?? null,
+      createdAt: item.createdAt.toISOString()
+    };
+  }
+
   private async releaseJobLock(job: Job): Promise<void> {
     if (!job.lockKey) {
       return;
@@ -379,4 +573,68 @@ export class JobsService {
 
     await this.redisService.releaseLock(this.redisService.key(`job:lock:${job.id}`), job.lockKey);
   }
+
+  private async createEvent(
+    job: {
+      id: string;
+      correlationId: string | null;
+    },
+    input: JobEventInput
+  ): Promise<void> {
+    await this.prisma.jobEvent.create({
+      data: {
+        jobId: job.id,
+        correlationId: input.correlationId ?? job.correlationId,
+        type: input.type,
+        level: input.level ?? "INFO",
+        message: input.message,
+        metadata: sanitizeJobMetadata(input.metadata) as Prisma.InputJsonValue | undefined
+      }
+    });
+  }
+}
+
+const REDACT_KEYS = [
+  "password",
+  "secret",
+  "token",
+  "authorization",
+  "credential",
+  "accesskey",
+  "bindpassword"
+] as const;
+
+function sanitizeJobMetadata(input: unknown): unknown {
+  if (input === undefined) {
+    return undefined;
+  }
+
+  if (input === null) {
+    return null;
+  }
+
+  if (typeof input === "string" || typeof input === "number" || typeof input === "boolean") {
+    return input;
+  }
+
+  if (Array.isArray(input)) {
+    return input.map((item) => sanitizeJobMetadata(item));
+  }
+
+  if (typeof input === "object") {
+    const result: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(input)) {
+      const lowered = key.toLowerCase();
+      if (REDACT_KEYS.some((segment) => lowered.includes(segment))) {
+        result[key] = "[REDACTED]";
+      } else {
+        result[key] = sanitizeJobMetadata(value);
+      }
+    }
+
+    return result;
+  }
+
+  return String(input);
 }

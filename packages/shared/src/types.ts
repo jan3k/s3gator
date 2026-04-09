@@ -35,6 +35,7 @@ export interface PaginationQuery {
 
 export type JobType = "FOLDER_RENAME" | "FOLDER_DELETE" | "BUCKET_SYNC" | "UPLOAD_CLEANUP";
 export type JobStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELED";
+export type JobEventLevel = "INFO" | "WARN" | "ERROR";
 
 export interface JobProgress {
   totalItems?: number;
@@ -46,6 +47,7 @@ export interface JobPublic {
   id: string;
   type: JobType;
   status: JobStatus;
+  correlationId: string | null;
   createdByUserId: string | null;
   createdAt: string;
   startedAt: string | null;
@@ -54,6 +56,22 @@ export interface JobPublic {
   failureSummary: string | null;
   progress: JobProgress | null;
   result: Record<string, unknown> | null;
+}
+
+export interface JobEventPublic {
+  id: string;
+  jobId: string;
+  correlationId: string | null;
+  type: string;
+  level: JobEventLevel;
+  message: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface JobDetailPublic {
+  job: JobPublic;
+  events: JobEventPublic[];
 }
 
 export interface UploadSessionPublic {

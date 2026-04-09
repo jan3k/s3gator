@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Ip, Param, Post, Put, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Ip, Param, Post, Put, Req, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { BUCKET_PERMISSIONS } from "@s3gator/shared";
 import { CurrentUser } from "@/auth/current-user.decorator.js";
@@ -45,14 +45,19 @@ export class BucketsController {
   @Post("admin/buckets/sync")
   @UseGuards(RoleGuard)
   @RequireRoles("SUPER_ADMIN")
-  sync(@CurrentUser() actor: AuthenticatedRequest["user"], @Ip() ipAddress: string) {
+  sync(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Ip() ipAddress: string,
+    @Req() req: AuthenticatedRequest
+  ) {
     if (!actor) {
       return [];
     }
 
     return this.jobsService.enqueueBucketSync({
       actor,
-      ipAddress
+      ipAddress,
+      correlationId: req.correlationId
     });
   }
 

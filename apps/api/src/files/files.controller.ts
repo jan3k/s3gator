@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Ip, Param, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Ip, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import {
   createFolderSchema,
@@ -108,7 +108,12 @@ export class FilesController {
   }
 
   @Delete()
-  async delete(@CurrentUser() user: AuthenticatedRequest["user"], @Body() body: unknown, @Ip() ipAddress: string) {
+  async delete(
+    @CurrentUser() user: AuthenticatedRequest["user"],
+    @Body() body: unknown,
+    @Ip() ipAddress: string,
+    @Req() req: AuthenticatedRequest
+  ) {
     if (!user) {
       return { error: "not authenticated" };
     }
@@ -120,7 +125,8 @@ export class FilesController {
         actor: user,
         bucket: parsed.bucket,
         key: parsed.key,
-        ipAddress
+        ipAddress,
+        correlationId: req.correlationId
       });
 
       return {
@@ -133,7 +139,12 @@ export class FilesController {
   }
 
   @Post("rename")
-  async rename(@CurrentUser() user: AuthenticatedRequest["user"], @Body() body: unknown, @Ip() ipAddress: string) {
+  async rename(
+    @CurrentUser() user: AuthenticatedRequest["user"],
+    @Body() body: unknown,
+    @Ip() ipAddress: string,
+    @Req() req: AuthenticatedRequest
+  ) {
     if (!user) {
       return { error: "not authenticated" };
     }
@@ -146,7 +157,8 @@ export class FilesController {
         bucket: parsed.bucket,
         oldKey: parsed.oldKey,
         newKey: parsed.newKey,
-        ipAddress
+        ipAddress,
+        correlationId: req.correlationId
       });
 
       return {

@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import { randomBytes, createCipheriv, createDecipheriv, createHash } from "crypto";
 import { ConfigService } from "@nestjs/config";
 
@@ -6,8 +6,11 @@ import { ConfigService } from "@nestjs/config";
 export class CryptoService {
   private readonly key: Buffer;
 
-  constructor(configService: ConfigService) {
-    const raw = configService.getOrThrow<string>("APP_ENCRYPTION_KEY");
+  constructor(@Inject(ConfigService) configService?: ConfigService) {
+    const raw = configService?.get<string>("APP_ENCRYPTION_KEY") ?? process.env.APP_ENCRYPTION_KEY;
+    if (!raw) {
+      throw new Error("APP_ENCRYPTION_KEY is required");
+    }
     this.key = normalizeKeyMaterial(raw);
   }
 
