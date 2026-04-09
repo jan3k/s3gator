@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BucketsService } from "./buckets.service.js";
 
 const prisma = {
+  adminBucketScope: {
+    findFirst: vi.fn()
+  },
   bucket: {
     findUnique: vi.fn()
   },
@@ -44,6 +47,7 @@ describe("BucketsService audit", () => {
   });
 
   it("writes audit log when bucket grants are updated", async () => {
+    prisma.adminBucketScope.findFirst.mockResolvedValue({ id: "scope-1" });
     prisma.bucket.findUnique.mockResolvedValue({ id: "bucket-1", name: "bucket-a" });
     prisma.user.findUnique.mockResolvedValue({
       id: "user-1",
@@ -77,5 +81,24 @@ describe("BucketsService audit", () => {
         entityId: "bucket-1"
       })
     );
+  });
+
+  it("blocks ADMIN from changing grants outside assigned scope", async () => {
+    prisma.adminBucketScope.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.setUserBucketPermissions(
+        {
+          id: "admin-1",
+          username: "admin",
+          email: "admin@example.com",
+          displayName: "Admin",
+          role: "ADMIN"
+        },
+        "user-1",
+        "bucket-1",
+        ["bucket:list"]
+      )
+    ).rejects.toThrowError(/not scoped/i);
   });
 });

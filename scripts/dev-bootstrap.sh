@@ -9,8 +9,8 @@ if [[ ! -f .env ]]; then
   echo "Created .env from .env.example. Update secrets before production use."
 fi
 
-echo "Starting PostgreSQL..."
-docker compose -f docker-compose.dev.yml up -d postgres
+echo "Starting PostgreSQL + Redis..."
+docker compose -f docker-compose.dev.yml up -d postgres redis
 
 echo "Installing dependencies..."
 npx pnpm install

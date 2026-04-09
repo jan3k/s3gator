@@ -38,6 +38,37 @@ type Connection = {
   healthStatus: string | null;
 };
 
+type Job = {
+  id: string;
+  type: "FOLDER_RENAME" | "FOLDER_DELETE" | "BUCKET_SYNC" | "UPLOAD_CLEANUP";
+  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELED";
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  cancelRequestedAt: string | null;
+  failureSummary: string | null;
+  progress: {
+    totalItems?: number;
+    processedItems?: number;
+  } | null;
+};
+
+type UploadSession = {
+  id: string;
+  bucketName: string;
+  objectKey: string;
+  status: "INITIATED" | "IN_PROGRESS" | "COMPLETED" | "ABORTED" | "FAILED";
+  completedPartNumbers: number[];
+  totalParts: number | null;
+  updatedAt: string;
+  error: string | null;
+};
+
+type AdminScope = {
+  bucketId: string;
+  bucketName: string;
+};
+
 type Grant = {
   userId: string;
   permission: {
@@ -55,6 +86,8 @@ export default function AdminPage() {
   const [selectedBucketId, setSelectedBucketId] = useState("");
   const [selectedUserId, setSelectedUserId] = useState("");
   const [selectedPermissions, setSelectedPermissions] = useState<BucketPermission[]>([]);
+  const [selectedAdminId, setSelectedAdminId] = useState("");
+  const [selectedScopeBucketIds, setSelectedScopeBucketIds] = useState<string[]>([]);
   const [statusMessage, setStatusMessage] = useState<string>("");
 
   const meQuery = useQuery({
@@ -87,17 +120,56 @@ export default function AdminPage() {
         bindDn: string | null;
         searchBase: string | null;
         searchFilter: string;
-      }>("/admin/settings/ldap")
+      }>("/admin/settings/ldap"),
+    enabled: meQuery.data?.user?.role === "SUPER_ADMIN"
   });
   const authModeQuery = useQuery({
     queryKey: ["admin", "auth-mode"],
-    queryFn: () => apiFetch<AuthModeResponse>("/admin/settings/auth-mode")
+    queryFn: () => apiFetch<AuthModeResponse>("/admin/settings/auth-mode"),
+    enabled: meQuery.data?.user?.role === "SUPER_ADMIN"
   });
 
   const connectionsQuery = useQuery({
     queryKey: ["admin", "connections"],
-    queryFn: () => apiFetch<Connection[]>("/admin/connections")
+    queryFn: () => apiFetch<Connection[]>("/admin/connections"),
+    enabled: meQuery.data?.user?.role === "SUPER_ADMIN"
   });
+
+  const jobsQuery = useQuery({
+    queryKey: ["jobs", "all"],
+    queryFn: () => apiFetch<Job[]>("/jobs?scope=all&limit=200"),
+    enabled: meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN"
+  });
+
+  const uploadSessionsQuery = useQuery({
+    queryKey: ["admin", "upload-sessions"],
+    queryFn: () => apiFetch<UploadSession[]>("/files/multipart/sessions?scope=all&limit=100"),
+    enabled: meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN"
+  });
+
+  const adminUsers = useMemo(
+    () => usersQuery.data?.filter((user) => user.role.code === "ADMIN") ?? [],
+    [usersQuery.data]
+  );
+
+  useEffect(() => {
+    if (!selectedAdminId && adminUsers[0]?.id) {
+      setSelectedAdminId(adminUsers[0].id);
+    }
+  }, [adminUsers, selectedAdminId]);
+
+  const adminScopesQuery = useQuery({
+    queryKey: ["admin", "scopes", selectedAdminId],
+    queryFn: () => apiFetch<AdminScope[]>(`/admin/users/${selectedAdminId}/scopes`),
+    enabled: Boolean(selectedAdminId) && meQuery.data?.user?.role === "SUPER_ADMIN"
+  });
+
+  useEffect(() => {
+    if (!adminScopesQuery.data) {
+      return;
+    }
+    setSelectedScopeBucketIds(adminScopesQuery.data.map((scope) => scope.bucketId));
+  }, [adminScopesQuery.data]);
 
   const auditQuery = useQuery({
     queryKey: ["admin", "audit"],
@@ -151,9 +223,8 @@ export default function AdminPage() {
   const syncBucketsMutation = useMutation({
     mutationFn: () => apiFetch("/admin/buckets/sync", { method: "POST" }),
     onSuccess: () => {
-      setStatusMessage("Buckets synced from Garage Admin API");
-      void queryClient.invalidateQueries({ queryKey: ["admin", "buckets"] });
-      void queryClient.invalidateQueries({ queryKey: ["buckets"] });
+      setStatusMessage("Bucket sync job queued");
+      void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
     }
   });
 
@@ -219,6 +290,35 @@ export default function AdminPage() {
     onSuccess: () => {
       setStatusMessage("Connection health check completed");
       void queryClient.invalidateQueries({ queryKey: ["admin", "connections"] });
+    }
+  });
+
+  const cancelJobMutation = useMutation({
+    mutationFn: (jobId: string) => apiFetch(`/jobs/${jobId}/cancel`, { method: "POST" }),
+    onSuccess: () => {
+      setStatusMessage("Job cancellation requested");
+      void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
+    }
+  });
+
+  const queueUploadCleanupMutation = useMutation({
+    mutationFn: () => apiFetch("/jobs/maintenance/upload-cleanup", { method: "POST" }),
+    onSuccess: () => {
+      setStatusMessage("Upload cleanup job queued");
+      void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
+    }
+  });
+
+  const saveAdminScopesMutation = useMutation({
+    mutationFn: (bucketIds: string[]) =>
+      apiFetch(`/admin/users/${selectedAdminId}/scopes`, {
+        method: "PUT",
+        body: JSON.stringify({ bucketIds })
+      }),
+    onSuccess: () => {
+      setStatusMessage("Admin scope updated");
+      void queryClient.invalidateQueries({ queryKey: ["admin", "scopes", selectedAdminId] });
+      void queryClient.invalidateQueries({ queryKey: ["admin", "buckets"] });
     }
   });
 
@@ -376,148 +476,299 @@ export default function AdminPage() {
         </button>
       </section>
 
-      <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
-        <h2 className="text-base font-semibold text-slate-900">LDAP settings</h2>
-        <form
-          className="mt-3 grid gap-2 md:grid-cols-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const formData = new FormData(event.currentTarget);
+      {meQuery.data?.user?.role === "SUPER_ADMIN" ? (
+        <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+          <h2 className="text-base font-semibold text-slate-900">Admin scopes</h2>
+          <p className="mt-1 text-sm text-slate-600">Limit ADMIN operations to selected buckets.</p>
 
-            void saveLdapMutation.mutate({
-              enabled: formData.get("enabled") === "on",
-              url: String(formData.get("url") ?? "") || null,
-              bindDn: String(formData.get("bindDn") ?? "") || null,
-              bindPassword: String(formData.get("bindPassword") ?? "") || undefined,
-              searchBase: String(formData.get("searchBase") ?? "") || null,
-              searchFilter: String(formData.get("searchFilter") ?? "(uid={{username}})"),
-              usernameAttribute: String(formData.get("usernameAttribute") ?? "uid"),
-              emailAttribute: String(formData.get("emailAttribute") ?? "mail"),
-              displayNameAttribute: String(formData.get("displayNameAttribute") ?? "cn"),
-              groupAttribute: String(formData.get("groupAttribute") ?? "memberOf"),
-              groupRoleMapping: {},
-              tlsRejectUnauthorized: formData.get("tlsRejectUnauthorized") === "on"
-            });
-          }}
-        >
-          <label className="col-span-2 inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" name="enabled" defaultChecked={ldapQuery.data?.enabled ?? false} />
-            Enable LDAP
-          </label>
-          <input name="url" defaultValue={ldapQuery.data?.url ?? ""} className="rounded border border-slate-300 px-3 py-2" placeholder="ldap://host:389" />
-          <input name="bindDn" defaultValue={ldapQuery.data?.bindDn ?? ""} className="rounded border border-slate-300 px-3 py-2" placeholder="bind dn" />
-          <input name="bindPassword" type="password" className="rounded border border-slate-300 px-3 py-2" placeholder="bind password" />
-          <input name="searchBase" defaultValue={ldapQuery.data?.searchBase ?? ""} className="rounded border border-slate-300 px-3 py-2" placeholder="dc=example,dc=com" />
-          <input name="searchFilter" defaultValue={ldapQuery.data?.searchFilter ?? "(uid={{username}})"} className="rounded border border-slate-300 px-3 py-2" placeholder="(uid={{username}})" />
-          <input name="usernameAttribute" defaultValue="uid" className="rounded border border-slate-300 px-3 py-2" placeholder="username attribute" />
-          <input name="emailAttribute" defaultValue="mail" className="rounded border border-slate-300 px-3 py-2" placeholder="email attribute" />
-          <input name="displayNameAttribute" defaultValue="cn" className="rounded border border-slate-300 px-3 py-2" placeholder="display name attribute" />
-          <input name="groupAttribute" defaultValue="memberOf" className="rounded border border-slate-300 px-3 py-2" placeholder="group attribute" />
-          <label className="col-span-2 inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" name="tlsRejectUnauthorized" defaultChecked />
-            Verify LDAP TLS certificates
-          </label>
-          <button className="col-span-2 rounded bg-blue-600 px-3 py-2 text-sm text-white">Save LDAP Settings</button>
-        </form>
-      </section>
+          <div className="mt-3 grid gap-3 lg:grid-cols-2">
+            <label className="text-sm">
+              Admin user
+              <select
+                className="mt-1 w-full rounded border border-slate-300 px-3 py-2"
+                value={selectedAdminId}
+                onChange={(event) => setSelectedAdminId(event.target.value)}
+              >
+                {adminUsers.map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.username}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
 
-      <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
-        <h2 className="text-base font-semibold text-slate-900">Authentication mode</h2>
-        <p className="mt-1 text-sm text-slate-600">Controls whether local, LDAP, or hybrid login is allowed.</p>
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <select
-            className="rounded border border-slate-300 px-3 py-2 text-sm"
-            value={authModeQuery.data?.mode ?? "local"}
-            onChange={(event) => {
-              void saveAuthModeMutation.mutate(event.target.value as "local" | "ldap" | "hybrid");
+          <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-4">
+            {bucketsQuery.data?.map((bucket) => (
+              <label key={bucket.id} className="inline-flex items-center gap-2 rounded border border-slate-200 px-2 py-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={selectedScopeBucketIds.includes(bucket.id)}
+                  onChange={(event) => {
+                    setSelectedScopeBucketIds((prev) =>
+                      event.target.checked
+                        ? [...new Set([...prev, bucket.id])]
+                        : prev.filter((item) => item !== bucket.id)
+                    );
+                  }}
+                />
+                {bucket.name}
+              </label>
+            ))}
+          </div>
+
+          <button
+            className="mt-3 rounded bg-blue-600 px-3 py-2 text-sm text-white"
+            disabled={!selectedAdminId}
+            onClick={() => {
+              void saveAdminScopesMutation.mutate(selectedScopeBucketIds);
             }}
           >
-            <option value="local">local</option>
-            <option value="ldap">ldap</option>
-            <option value="hybrid">hybrid</option>
-          </select>
-          <span className="text-xs text-slate-500">
-            Current mode: {authModeQuery.data?.mode ?? "loading..."}
-          </span>
-        </div>
-      </section>
+            Save Admin Scope
+          </button>
+        </section>
+      ) : null}
 
-      <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
-        <h2 className="text-base font-semibold text-slate-900">Garage connections</h2>
+      {meQuery.data?.user?.role === "SUPER_ADMIN" ? (
+        <>
+          <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+            <h2 className="text-base font-semibold text-slate-900">LDAP settings</h2>
+            <form
+              className="mt-3 grid gap-2 md:grid-cols-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const formData = new FormData(event.currentTarget);
 
-        <div className="mt-3 overflow-auto rounded border border-slate-200">
-          <table className="min-w-full text-sm">
-            <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500">
-              <tr>
-                <th className="px-3 py-2">Name</th>
-                <th className="px-3 py-2">Endpoint</th>
-                <th className="px-3 py-2">Region</th>
-                <th className="px-3 py-2">Default</th>
-                <th className="px-3 py-2">Health</th>
-                <th className="px-3 py-2">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {connectionsQuery.data?.map((conn) => (
-                <tr key={conn.id}>
-                  <td className="px-3 py-2">{conn.name}</td>
-                  <td className="px-3 py-2">{conn.endpoint}</td>
-                  <td className="px-3 py-2">{conn.region}</td>
-                  <td className="px-3 py-2">{conn.isDefault ? "yes" : "no"}</td>
-                  <td className="px-3 py-2">{conn.healthStatus ?? "unknown"}</td>
-                  <td className="px-3 py-2">
-                    <button
-                      className="rounded border border-slate-300 px-2 py-1 text-xs"
-                      onClick={() => {
-                        void healthMutation.mutate(conn.id);
-                      }}
-                    >
-                      Check health
-                    </button>
-                  </td>
+                void saveLdapMutation.mutate({
+                  enabled: formData.get("enabled") === "on",
+                  url: String(formData.get("url") ?? "") || null,
+                  bindDn: String(formData.get("bindDn") ?? "") || null,
+                  bindPassword: String(formData.get("bindPassword") ?? "") || undefined,
+                  searchBase: String(formData.get("searchBase") ?? "") || null,
+                  searchFilter: String(formData.get("searchFilter") ?? "(uid={{username}})"),
+                  usernameAttribute: String(formData.get("usernameAttribute") ?? "uid"),
+                  emailAttribute: String(formData.get("emailAttribute") ?? "mail"),
+                  displayNameAttribute: String(formData.get("displayNameAttribute") ?? "cn"),
+                  groupAttribute: String(formData.get("groupAttribute") ?? "memberOf"),
+                  groupRoleMapping: {},
+                  tlsRejectUnauthorized: formData.get("tlsRejectUnauthorized") === "on"
+                });
+              }}
+            >
+              <label className="col-span-2 inline-flex items-center gap-2 text-sm">
+                <input type="checkbox" name="enabled" defaultChecked={ldapQuery.data?.enabled ?? false} />
+                Enable LDAP
+              </label>
+              <input name="url" defaultValue={ldapQuery.data?.url ?? ""} className="rounded border border-slate-300 px-3 py-2" placeholder="ldap://host:389" />
+              <input name="bindDn" defaultValue={ldapQuery.data?.bindDn ?? ""} className="rounded border border-slate-300 px-3 py-2" placeholder="bind dn" />
+              <input name="bindPassword" type="password" className="rounded border border-slate-300 px-3 py-2" placeholder="bind password" />
+              <input name="searchBase" defaultValue={ldapQuery.data?.searchBase ?? ""} className="rounded border border-slate-300 px-3 py-2" placeholder="dc=example,dc=com" />
+              <input name="searchFilter" defaultValue={ldapQuery.data?.searchFilter ?? "(uid={{username}})"} className="rounded border border-slate-300 px-3 py-2" placeholder="(uid={{username}})" />
+              <input name="usernameAttribute" defaultValue="uid" className="rounded border border-slate-300 px-3 py-2" placeholder="username attribute" />
+              <input name="emailAttribute" defaultValue="mail" className="rounded border border-slate-300 px-3 py-2" placeholder="email attribute" />
+              <input name="displayNameAttribute" defaultValue="cn" className="rounded border border-slate-300 px-3 py-2" placeholder="display name attribute" />
+              <input name="groupAttribute" defaultValue="memberOf" className="rounded border border-slate-300 px-3 py-2" placeholder="group attribute" />
+              <label className="col-span-2 inline-flex items-center gap-2 text-sm">
+                <input type="checkbox" name="tlsRejectUnauthorized" defaultChecked />
+                Verify LDAP TLS certificates
+              </label>
+              <button className="col-span-2 rounded bg-blue-600 px-3 py-2 text-sm text-white">Save LDAP Settings</button>
+            </form>
+          </section>
+
+          <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+            <h2 className="text-base font-semibold text-slate-900">Authentication mode</h2>
+            <p className="mt-1 text-sm text-slate-600">Controls whether local, LDAP, or hybrid login is allowed.</p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <select
+                className="rounded border border-slate-300 px-3 py-2 text-sm"
+                value={authModeQuery.data?.mode ?? "local"}
+                onChange={(event) => {
+                  void saveAuthModeMutation.mutate(event.target.value as "local" | "ldap" | "hybrid");
+                }}
+              >
+                <option value="local">local</option>
+                <option value="ldap">ldap</option>
+                <option value="hybrid">hybrid</option>
+              </select>
+              <span className="text-xs text-slate-500">
+                Current mode: {authModeQuery.data?.mode ?? "loading..."}
+              </span>
+            </div>
+          </section>
+
+          <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+            <h2 className="text-base font-semibold text-slate-900">Garage connections</h2>
+
+            <div className="mt-3 overflow-auto rounded border border-slate-200">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2">Name</th>
+                    <th className="px-3 py-2">Endpoint</th>
+                    <th className="px-3 py-2">Region</th>
+                    <th className="px-3 py-2">Default</th>
+                    <th className="px-3 py-2">Health</th>
+                    <th className="px-3 py-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {connectionsQuery.data?.map((conn) => (
+                    <tr key={conn.id}>
+                      <td className="px-3 py-2">{conn.name}</td>
+                      <td className="px-3 py-2">{conn.endpoint}</td>
+                      <td className="px-3 py-2">{conn.region}</td>
+                      <td className="px-3 py-2">{conn.isDefault ? "yes" : "no"}</td>
+                      <td className="px-3 py-2">{conn.healthStatus ?? "unknown"}</td>
+                      <td className="px-3 py-2">
+                        <button
+                          className="rounded border border-slate-300 px-2 py-1 text-xs"
+                          onClick={() => {
+                            void healthMutation.mutate(conn.id);
+                          }}
+                        >
+                          Check health
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <form
+              className="mt-3 grid gap-2 md:grid-cols-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const data = new FormData(event.currentTarget);
+                void createConnectionMutation.mutate({
+                  name: String(data.get("name") ?? ""),
+                  endpoint: String(data.get("endpoint") ?? ""),
+                  region: String(data.get("region") ?? "garage"),
+                  forcePathStyle: data.get("forcePathStyle") === "on",
+                  accessKeyId: String(data.get("accessKeyId") ?? ""),
+                  secretAccessKey: String(data.get("secretAccessKey") ?? ""),
+                  adminApiUrl: String(data.get("adminApiUrl") ?? "") || undefined,
+                  adminToken: String(data.get("adminToken") ?? "") || undefined,
+                  isDefault: data.get("isDefault") === "on"
+                });
+                event.currentTarget.reset();
+              }}
+            >
+              <input required name="name" className="rounded border border-slate-300 px-3 py-2" placeholder="connection name" />
+              <input required name="endpoint" className="rounded border border-slate-300 px-3 py-2" placeholder="https://s3.example.com" />
+              <input name="region" defaultValue="garage" className="rounded border border-slate-300 px-3 py-2" placeholder="garage" />
+              <label className="inline-flex items-center gap-2 text-sm">
+                <input type="checkbox" name="forcePathStyle" defaultChecked />
+                Force path style
+              </label>
+              <input required name="accessKeyId" className="rounded border border-slate-300 px-3 py-2" placeholder="access key id" />
+              <input required name="secretAccessKey" className="rounded border border-slate-300 px-3 py-2" placeholder="secret access key" />
+              <input name="adminApiUrl" className="rounded border border-slate-300 px-3 py-2" placeholder="http://garage-admin:3903" />
+              <input name="adminToken" className="rounded border border-slate-300 px-3 py-2" placeholder="admin bearer token" />
+              <label className="inline-flex items-center gap-2 text-sm">
+                <input type="checkbox" name="isDefault" />
+                Set as default
+              </label>
+              <button className="rounded bg-blue-600 px-3 py-2 text-sm text-white">Save Connection</button>
+            </form>
+          </section>
+        </>
+      ) : null}
+
+      {(meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN") ? (
+        <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-base font-semibold text-slate-900">Background jobs</h2>
+            <button
+              className="rounded border border-slate-300 px-3 py-2 text-xs"
+              onClick={() => {
+                void queueUploadCleanupMutation.mutate();
+              }}
+            >
+              Queue upload cleanup
+            </button>
+          </div>
+
+          <div className="max-h-80 overflow-auto rounded border border-slate-200">
+            <table className="min-w-full text-xs">
+              <thead className="bg-slate-50 text-left uppercase text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2">Progress</th>
+                  <th className="px-3 py-2">Failure</th>
+                  <th className="px-3 py-2">Created</th>
+                  <th className="px-3 py-2">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {jobsQuery.data?.map((job) => (
+                  <tr key={job.id}>
+                    <td className="px-3 py-2">{job.type}</td>
+                    <td className="px-3 py-2">{job.status}</td>
+                    <td className="px-3 py-2">
+                      {job.progress?.processedItems !== undefined
+                        ? `${job.progress.processedItems}/${job.progress.totalItems ?? "?"}`
+                        : "-"}
+                    </td>
+                    <td className="px-3 py-2">{job.failureSummary ?? "-"}</td>
+                    <td className="px-3 py-2">{job.createdAt}</td>
+                    <td className="px-3 py-2">
+                      {(job.status === "QUEUED" || job.status === "RUNNING") ? (
+                        <button
+                          className="rounded border border-red-300 px-2 py-1 text-[11px] text-red-700"
+                          onClick={() => {
+                            void cancelJobMutation.mutate(job.id);
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
-        <form
-          className="mt-3 grid gap-2 md:grid-cols-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const data = new FormData(event.currentTarget);
-            void createConnectionMutation.mutate({
-              name: String(data.get("name") ?? ""),
-              endpoint: String(data.get("endpoint") ?? ""),
-              region: String(data.get("region") ?? "garage"),
-              forcePathStyle: data.get("forcePathStyle") === "on",
-              accessKeyId: String(data.get("accessKeyId") ?? ""),
-              secretAccessKey: String(data.get("secretAccessKey") ?? ""),
-              adminApiUrl: String(data.get("adminApiUrl") ?? "") || undefined,
-              adminToken: String(data.get("adminToken") ?? "") || undefined,
-              isDefault: data.get("isDefault") === "on"
-            });
-            event.currentTarget.reset();
-          }}
-        >
-          <input required name="name" className="rounded border border-slate-300 px-3 py-2" placeholder="connection name" />
-          <input required name="endpoint" className="rounded border border-slate-300 px-3 py-2" placeholder="https://s3.example.com" />
-          <input name="region" defaultValue="garage" className="rounded border border-slate-300 px-3 py-2" placeholder="garage" />
-          <label className="inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" name="forcePathStyle" defaultChecked />
-            Force path style
-          </label>
-          <input required name="accessKeyId" className="rounded border border-slate-300 px-3 py-2" placeholder="access key id" />
-          <input required name="secretAccessKey" className="rounded border border-slate-300 px-3 py-2" placeholder="secret access key" />
-          <input name="adminApiUrl" className="rounded border border-slate-300 px-3 py-2" placeholder="http://garage-admin:3903" />
-          <input name="adminToken" className="rounded border border-slate-300 px-3 py-2" placeholder="admin bearer token" />
-          <label className="inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" name="isDefault" />
-            Set as default
-          </label>
-          <button className="rounded bg-blue-600 px-3 py-2 text-sm text-white">Save Connection</button>
-        </form>
-      </section>
+      {(meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN") ? (
+        <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+          <h2 className="text-base font-semibold text-slate-900">Upload sessions</h2>
+          <div className="mt-3 max-h-72 overflow-auto rounded border border-slate-200">
+            <table className="min-w-full text-xs">
+              <thead className="bg-slate-50 text-left uppercase text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Bucket</th>
+                  <th className="px-3 py-2">Key</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2">Parts</th>
+                  <th className="px-3 py-2">Error</th>
+                  <th className="px-3 py-2">Updated</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {uploadSessionsQuery.data?.map((session) => (
+                  <tr key={session.id}>
+                    <td className="px-3 py-2">{session.bucketName}</td>
+                    <td className="px-3 py-2">{session.objectKey}</td>
+                    <td className="px-3 py-2">{session.status}</td>
+                    <td className="px-3 py-2">
+                      {session.completedPartNumbers.length}/{session.totalParts ?? "?"}
+                    </td>
+                    <td className="px-3 py-2">{session.error ?? "-"}</td>
+                    <td className="px-3 py-2">{session.updatedAt}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       {meQuery.data?.user?.role === "SUPER_ADMIN" ? (
         <section className="rounded-xl border border-slate-200 bg-white p-4">

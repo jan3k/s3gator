@@ -1,0 +1,165 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16.9-alpine
+    container_name: s3gator-int-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: s3gator
+      POSTGRES_USER: s3gator
+      POSTGRES_PASSWORD: s3gator
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U s3gator -d s3gator"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - s3gator-int-postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: s3gator-int-redis
+    restart: unless-stopped
+    ports:
+      - "56379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  garage:
+    image: dxflrs/garage:v2.2.0
+    container_name: s3gator-int-garage
+    restart: unless-stopped
+    command: ["server", "-c", "/etc/garage/config.toml"]
+    ports:
+      - "3900:3900"
+      - "3903:3903"
+    volumes:
+      - ./docker/garage/config.toml:/etc/garage/config.toml:ro
+      - s3gator-int-garage:/var/lib/garage
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/integration.Dockerfile
+    container_name: s3gator-int-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      garage:
+        condition: service_started
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      APP_BASE_URL: http://localhost:4000
+      DATABASE_URL: postgresql://s3gator:s3gator@postgres:5432/s3gator
+      APP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      SESSION_COOKIE_NAME: s3gator_sid
+      SESSION_TTL_HOURS: 24
+      LOGIN_MAX_ATTEMPTS: 8
+      LOGIN_WINDOW_SECONDS: 300
+      REDIS_URL: redis://redis:6379
+      REDIS_ENABLED: "true"
+      REDIS_PREFIX: s3gator
+      JOB_WORKER_INLINE: "false"
+      JOB_WORKER_POLL_MS: 2000
+      JOB_LOCK_TTL_SECONDS: 60
+      UPLOAD_SESSION_TTL_HOURS: 24
+      UPLOAD_PART_SIZE_BYTES: 10485760
+      UPLOAD_CLEANUP_BATCH_SIZE: 50
+      DEFAULT_SUPER_ADMIN_USERNAME: admin
+      DEFAULT_SUPER_ADMIN_PASSWORD: change-me-now-please
+      DEFAULT_SUPER_ADMIN_EMAIL: admin@example.local
+      GARAGE_ENDPOINT: http://garage:3900
+      GARAGE_REGION: garage
+      GARAGE_FORCE_PATH_STYLE: "true"
+      GARAGE_ACCESS_KEY_ID: integration-access-key
+      GARAGE_SECRET_ACCESS_KEY: integration-secret-key
+      GARAGE_ADMIN_API_URL: http://garage:3903
+      GARAGE_ADMIN_TOKEN: stage3-dev-admin-token-change-me
+    ports:
+      - "4000:4000"
+    command: >-
+      sh -lc "
+      npx pnpm db:generate &&
+      npx pnpm --filter @s3gator/api prisma migrate deploy &&
+      npx pnpm db:seed &&
+      npx pnpm --filter @s3gator/shared build &&
+      npx pnpm --filter @s3gator/s3 build &&
+      npx pnpm --filter @s3gator/api build &&
+      npx pnpm --filter @s3gator/api start
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/health/live >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/integration.Dockerfile
+    container_name: s3gator-int-worker
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://s3gator:s3gator@postgres:5432/s3gator
+      APP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      REDIS_URL: redis://redis:6379
+      REDIS_ENABLED: "true"
+      REDIS_PREFIX: s3gator
+      JOB_WORKER_INLINE: "false"
+      JOB_WORKER_POLL_MS: 2000
+      JOB_LOCK_TTL_SECONDS: 60
+      UPLOAD_CLEANUP_BATCH_SIZE: 50
+      GARAGE_ENDPOINT: http://garage:3900
+      GARAGE_REGION: garage
+      GARAGE_FORCE_PATH_STYLE: "true"
+      GARAGE_ACCESS_KEY_ID: integration-access-key
+      GARAGE_SECRET_ACCESS_KEY: integration-secret-key
+      GARAGE_ADMIN_API_URL: http://garage:3903
+      GARAGE_ADMIN_TOKEN: stage3-dev-admin-token-change-me
+    command: >-
+      sh -lc "
+      npx pnpm --filter @s3gator/shared build &&
+      npx pnpm --filter @s3gator/s3 build &&
+      npx pnpm --filter @s3gator/api build &&
+      npx pnpm --filter @s3gator/api start:worker
+      "
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/integration.Dockerfile
+    container_name: s3gator-int-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:4000
+    ports:
+      - "3000:3000"
+    command: >-
+      sh -lc "
+      npx pnpm --filter @s3gator/shared build &&
+      npx pnpm --filter @s3gator/ui build &&
+      npx pnpm --filter @s3gator/web build &&
+      npx pnpm --filter @s3gator/web start
+      "
+
+volumes:
+  s3gator-int-postgres:
+  s3gator-int-garage:

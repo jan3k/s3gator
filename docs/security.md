@@ -36,7 +36,7 @@ Date: 2026-04-09
   - search base/filter,
   - optional group-to-role mapping.
 - Session persistence in DB with token hashing and expiry.
-- Rate limiting on login attempts (IP/username keyed window).
+- Redis-backed distributed rate limiting on login attempts (IP/username keyed window).
 - Runtime auth mode enforcement:
   - `local`: local only,
   - `ldap`: LDAP only,
@@ -62,12 +62,16 @@ Date: 2026-04-09
   - `search:run`.
 - Enforcement happens in backend guards/services before any Garage operation.
 - Bucket visibility is explicit and requires `bucket:list`.
+- Scoped admin v2:
+  - `ADMIN` operational visibility and bucket-grant management are limited to explicitly scoped buckets,
+  - `SUPER_ADMIN` is global bypass.
 
 ## 4) Secrets Handling
 
 - Secrets in DB (Garage key/secret/admin token, LDAP bind password) are encrypted using AES-256-GCM with an app-level key (`APP_ENCRYPTION_KEY`).
 - API responses never include decrypted secrets or encrypted ciphertext secret columns.
 - Logging middleware redacts password/credential fields.
+- Job payload/audit metadata are redacted recursively for token/secret/password-like keys.
 
 ## 5) Audit Logging
 
@@ -83,6 +87,7 @@ Date: 2026-04-09
   - bucket grant updates,
   - destructive object/folder operations,
   - multipart upload completion/abort/failure.
+  - background job lifecycle state changes (queue/run/complete/fail/cancel metadata).
 
 ## 6) Garage Compatibility Safety
 
@@ -101,6 +106,6 @@ Date: 2026-04-09
 
 ## Known Security Limitations
 
-- Login rate limiter is currently in-memory per API process; for multi-instance deployments, move to Redis or DB-backed distributed rate limiting.
 - Per-operation object-level ABAC beyond bucket capability is not yet implemented.
 - Full SIEM export pipeline for audit logs is not included by default.
+- Garage integration environments still require careful bootstrap of keys/buckets to avoid overprivileged shared credentials.

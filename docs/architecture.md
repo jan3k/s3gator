@@ -1,265 +1,128 @@
-# Architecture: S3 Storage Manager for Garage v2.2.0
+# Architecture: Stage 3 (Resilience, Jobs, Operations)
 
 Date: 2026-04-09
 
-## Goals
+## Monorepo
 
-- Production-grade, secure, server-backed Garage S3 manager.
-- Human users authenticated in app (local or LDAP).
-- Authorization enforced by app DB policy layer (RBAC + per-bucket capabilities).
-- Garage credentials treated as infrastructure secrets.
-- No dependency on unsupported Garage features (ACL/policy/versioning).
+- `apps/api`: NestJS API + Prisma/PostgreSQL
+- `apps/web`: Next.js frontend
+- `packages/shared`: shared role/permission/types/schema contracts
+- `packages/s3`: Garage-compatible S3 + Admin API v2 service layer
+- `packages/ui`: shared UI primitives
 
-## Monorepo Layout
+## Runtime Topology
 
-- `apps/api` -> NestJS backend API (TypeScript)
-- `apps/web` -> Next.js frontend (React/TypeScript)
-- `packages/shared` -> shared domain types, Zod schemas, permission constants
-- `packages/s3` -> Garage-compatible S3 + Admin API clients and file-operation services
-- `packages/ui` -> reusable UI primitives/components for web app
+Recommended production runtime:
 
-Tooling:
-- `pnpm` workspaces
-- TypeScript project references
-- ESLint + Prettier
-- Vitest (unit/integration), Playwright (critical E2E)
+1. API instances (stateless)
+2. Worker instances (job execution loop)
+3. PostgreSQL (system of record)
+4. Redis (distributed limiter + runtime locking)
+5. Garage S3 endpoint + Garage Admin API v2 endpoint
 
-## Security Architecture
+## Security and Auth
 
-### Trust Boundaries
+- Local auth (Argon2id) + LDAP auth.
+- Auth mode (`local` / `ldap` / `hybrid`) is enforced in `AuthService`.
+- Session cookies are HTTP-only; mutating calls require CSRF token.
+- Authorization is app-native RBAC + per-bucket permissions.
+- `bucket:list` is explicit and required for bucket visibility.
+- Scoped admin v2 extends role model:
+  - `SUPER_ADMIN`: global
+  - `ADMIN`: operationally scoped to assigned buckets for grant and operational views
+  - `USER`: explicit per-bucket grants only
 
-- Browser is untrusted.
-- API is policy decision + enforcement point.
-- Garage S3/Admin credentials are server-side only.
+## Stage 3 Job System
 
-### Session/Auth
+Persistent job table (`jobs`) with:
 
-- Cookie-based sessions (`HttpOnly`, `SameSite=Lax`, secure in prod).
-- Session records persisted in PostgreSQL (`sessions` table).
-- CSRF token validation for mutating cookie-authenticated requests.
-- Login rate limiting per IP + username.
-- Password hashing: Argon2id.
+- `type`: `FOLDER_RENAME`, `FOLDER_DELETE`, `BUCKET_SYNC`, `UPLOAD_CLEANUP`
+- `status`: `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELED`
+- actor (`createdByUserId`)
+- payload/progress/result/failure summary
+- cancellation metadata
+- lock metadata (`lockKey`, `lockedAt`)
 
-### Secrets
+Execution model:
 
-- Secrets loaded from env / encrypted DB fields for runtime-managed connection records.
-- No secret returned in API responses.
-- Audit log excludes secret values.
+- API enqueues jobs.
+- Worker polls and claims jobs.
+- Claiming uses DB state transition and Redis lock.
+- Stale-running jobs are reclaimable after lock TTL.
+- Cancel is best-effort (checked between units of work).
 
-### Auditing
+## Redis Usage
 
-- Append-only audit table for:
-  - auth events,
-  - admin config changes,
-  - destructive object operations,
-  - permission changes.
+1. Login throttling:
+   - distributed key window (`login:<ip>:<username>`)
+2. Job coordination:
+   - lock key (`job:lock:<jobId>`) via `SET NX EX`
 
-## Authentication Model
+If Redis is disabled in local/test, process-local fallback is used for developer convenience.
 
-Two runtime modes (configurable):
+## File and Upload Architecture
 
-1. Local auth
-- Username/email + password (Argon2id).
-- Supports bootstrap Super Admin seed user.
+### File ops
 
-2. LDAP auth
-- Configurable server URL, bind DN/password, search base, search filter.
-- Optional group -> role mapping.
-- Optional fallback local Super Admin account for break-glass.
+- S3 folders are virtual.
+- Folder rename/delete operations are async background jobs.
+- File rename/delete remain direct.
 
-Implementation detail:
-- Unified `AuthService` dispatches to local/LDAP provider by mode.
-- On LDAP login success, user profile is upserted in local DB for authorization and audit continuity.
+### Multipart durability
 
-## Authorization Model
+`upload_sessions` now stores:
 
-### Base roles
+- `partSize`, `totalParts`, `fileSize`, `contentType`, `relativePath`
+- `completedParts` (partNumber + eTag)
+- `lastActivityAt`, `expiresAt`
 
-- `SUPER_ADMIN`
-- `ADMIN`
-- `USER`
+Resume flow:
 
-### Per-bucket capabilities (DB-managed)
+1. client asks `/files/multipart/recover`
+2. server returns recoverable session + completed parts
+3. client uploads only missing parts
+4. client records per-part completion (`part-complete`)
+5. client completes multipart with merged parts
 
-- `bucket:list`
-- `object:list`
-- `object:read`
-- `object:preview`
-- `object:download`
-- `object:upload`
-- `object:delete`
-- `object:rename`
-- `folder:create`
-- `folder:rename`
-- `folder:delete`
-- `folder:stats`
-- `search:run`
+## Observability
 
-### Evaluation
+Public operational endpoints:
 
-- Super Admin bypasses bucket scope checks.
-- Others require explicit assignment (`user_bucket_permissions`).
-- Bucket visibility is explicit and requires `bucket:list`.
-- API guards + policy service enforce capability checks before any S3/Admin operation.
-- User-management policy is enforced server-side:
-  - only `SUPER_ADMIN` can assign/remove `SUPER_ADMIN`,
-  - `ADMIN` can manage only `USER` accounts,
-  - `ADMIN` cannot modify privileged targets.
+- `GET /health/live`
+- `GET /health/ready`
+- `GET /metrics`
 
-## Backend Service Design
+Prometheus metrics include:
 
-## 1) `packages/s3`: Garage Integration Layer
+- login success/failure + latency
+- upload lifecycle events
+- job lifecycle events
+- S3 failures and latencies
+- LDAP auth failures
 
-### S3 client factory
+## Admin Surface
 
-- AWS SDK v3 `S3Client` with explicit:
-  - endpoint
-  - region
-  - `forcePathStyle`
-  - credentials
-- Optional per-request abort signal support.
+Admin UI now includes:
 
-### Admin API v2 client
+- background job table (status/progress/failure/cancel)
+- upload session visibility
+- scoped admin assignment (super-admin only)
+- existing Stage 2 controls (users, grants, LDAP, auth mode, connections, audit)
 
-- Typed HTTP client (OpenAPI-derived request/response contracts as internal TS types).
-- Bearer token auth only.
-- Methods for health checks, buckets, keys metadata.
+## Testing Lanes
 
-### File operation service contract
+Fast lane:
 
-Provided operations:
-- `listFiles(s3, prefix, bucket, opts?)`
-- `addFolder(s3, folderPath, bucket)`
-- `deleteFileOrFolder(s3, key, bucket)`
-- `renameFileOrFolder(s3, oldKey, newKey, bucket)`
-- `renameFolder(s3, oldPrefix, newPrefix, bucket)`
-- `getFilePreview(s3, key, download, bucket)`
-- `getFolderStats(s3, prefix, bucket)`
-- `searchFilesAndFolders(s3, prefix, term, bucket)`
-- `multiPartUpload(...)` orchestration primitives
+- workspace unit/service tests
+- lightweight Playwright smoke tests (`test/e2e`)
 
-Semantics:
-- Virtual folders represented by key prefixes.
-- Empty folder create via zero-byte `<prefix>/` placeholder object.
-- Rename implemented as copy+delete with bounded concurrency and in-request progress reporting.
-- Folder delete = recursive list + batch delete.
-- Search = recursive paginated listing under prefix + in-memory/key matching (contains/case-insensitive).
+Full integration lane:
 
-## 2) `apps/api`: NestJS API
+- `docker-compose.integration.yml` (Postgres, Redis, Garage, API, Worker, Web)
+- integration Playwright suite (`test/e2e-integration`) behind `INTEGRATION_E2E=1`
 
-Main modules:
-- `AuthModule` (local/LDAP, sessions, CSRF)
-- `UsersModule` (CRUD + role mgmt)
-- `AuthorizationModule` (guards + policy evaluator)
-- `BucketsModule` (bucket metadata + grants)
-- `FilesModule` (browse/upload/rename/delete/search/stats/preview)
-- `ConnectionsModule` (Garage connection config + health)
-- `AuditModule` (query + append logs)
-- `SettingsModule` (LDAP mode, app settings)
+## Honest Boundaries
 
-Cross-cutting:
-- request validation (Zod-based DTO parsing)
-- structured logging
-- OpenAPI/Swagger
-- global exception mapping
-
-## Upload Architecture
-
-### Strategy
-
-- Browser requests upload session from API.
-- API validates permissions and target path.
-- API creates multipart upload and returns signed URLs per part.
-- Browser uploads parts directly to Garage S3-compatible endpoint.
-- Browser reports completed ETags.
-- API completes multipart upload.
-
-### Features
-
-- large file support
-- retry per part
-- cancel/abort upload
-- progress reporting
-- folder drag/drop relative path preservation
-- upload session state persistence (`INITIATED`/`IN_PROGRESS`/`COMPLETED`/`ABORTED`/`FAILED`)
-
-## Frontend Architecture (`apps/web`)
-
-### Stack
-
-- Next.js + React + TypeScript
-- Tailwind + shadcn/ui
-- TanStack Query
-- React Hook Form + Zod
-
-### Feature areas
-
-- Auth: login screen (local/LDAP aware)
-- File manager:
-  - bucket switcher
-  - breadcrumbs
-  - file/folder table
-  - search + sorting
-  - context actions
-  - preview drawer
-  - upload center
-- Admin:
-  - users/roles
-  - bucket grants
-  - LDAP config
-  - Garage connection status
-  - audit logs
-
-### UX policy
-
-- role-aware actions hidden/disabled by capability
-- explicit loading/progress/error states
-- keyboard-friendly dialogs/menus where practical
-
-## Data Model Summary
-
-Core tables:
-- `users`
-- `local_credentials`
-- `ldap_config`
-- `sessions`
-- `roles`
-- `permissions`
-- `buckets`
-- `user_bucket_permissions`
-- `app_settings`
-- `audit_logs`
-- `upload_sessions`
-- `garage_connections`
-
-## Key Trade-offs
-
-1. App-native RBAC over Garage key ACL-like grants
-- Pros: strong human-user security model, auditable, independent of Garage key model.
-- Cons: requires ongoing sync/discovery of buckets and careful backend enforcement.
-
-2. Presigned multipart uploads vs backend proxy streaming
-- Pros: scales better for large files; lower API bandwidth pressure.
-- Cons: more orchestration complexity and upload session state.
-
-3. Dual auth providers (local + LDAP)
-- Pros: flexible enterprise deployment.
-- Cons: more config validation and operational complexity.
-
-4. No heavy background queue for rename/delete in Stage 2
-- Pros: lower operational complexity and easier local deployment.
-- Cons: long-running rename/delete operations do not provide persisted checkpoint/resume jobs.
-
-## Non-Goals (by design)
-
-- S3 ACL/policy management UI.
-- Object versioning UI/workflows.
-- Garage K2V management.
-
-## Deployment Model (Local Dev)
-
-- `docker-compose.dev.yml`:
-  - Postgres
-  - optional local Garage v2.2.0 container for integration tests
-- API and web run via pnpm workspace scripts.
-- Seed script creates first Super Admin and baseline roles/permissions.
+- Folder job execution is durable and restart-safe but not per-object checkpoint-resumable mid-run.
+- Cancel requests are best-effort for in-flight long S3 calls.
+- Full integration upload flows require Garage bootstrap (usable key + bucket alias) in the target environment.

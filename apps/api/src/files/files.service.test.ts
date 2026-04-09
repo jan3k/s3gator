@@ -38,8 +38,13 @@ const prisma = {
   bucket: {
     findUnique: vi.fn()
   },
+  adminBucketScope: {
+    findFirst: vi.fn()
+  },
   uploadSession: {
     create: vi.fn(),
+    findFirst: vi.fn(),
+    findMany: vi.fn(),
     findUnique: vi.fn(),
     update: vi.fn()
   }
@@ -49,12 +54,30 @@ const connectionsService = {
   getDefaultConnectionWithSecrets: vi.fn()
 };
 
+const configService = {
+  get: vi.fn((key: string, fallback: unknown) => {
+    if (key === "UPLOAD_PART_SIZE_BYTES") {
+      return 10 * 1024 * 1024;
+    }
+    if (key === "UPLOAD_SESSION_TTL_HOURS") {
+      return 24;
+    }
+    return fallback;
+  })
+};
+
 const authorizationService = {
   requireBucketPermission: vi.fn()
 };
 
 const auditService = {
   record: vi.fn()
+};
+
+const metricsService = {
+  recordS3Failure: vi.fn(),
+  recordS3Duration: vi.fn(),
+  recordUploadEvent: vi.fn()
 };
 
 const user = {
@@ -86,6 +109,7 @@ function mockActiveUploadSession() {
     bucketId: "bucket-1",
     objectKey: "folder/file.txt",
     uploadId: "upload-1",
+    completedParts: [],
     expiresAt: new Date(Date.now() + 60_000)
   });
 }
@@ -96,12 +120,15 @@ describe("FilesService hardening", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     service = new FilesService(
+      configService as never,
       prisma as never,
       connectionsService as never,
       authorizationService as never,
-      auditService as never
+      auditService as never,
+      metricsService as never
     );
     authorizationService.requireBucketPermission.mockResolvedValue(undefined);
+    prisma.adminBucketScope.findFirst.mockResolvedValue({ id: "scope-1" });
     mockDefaultConnection();
   });
 
@@ -243,5 +270,79 @@ describe("FilesService hardening", () => {
     expect(auditService.record).toHaveBeenCalledWith(
       expect.objectContaining({ action: "object.upload.failed" })
     );
+  });
+
+  it("records completed parts and deduplicates by part number", async () => {
+    prisma.uploadSession.findUnique.mockResolvedValue({
+      id: "upload-session-1",
+      userId: "user-1",
+      bucketId: "bucket-1",
+      objectKey: "folder/file.txt",
+      uploadId: "upload-1",
+      completedParts: [
+        { partNumber: 1, eTag: "etag-1-old" },
+        { partNumber: 2, eTag: "etag-2" }
+      ],
+      expiresAt: new Date(Date.now() + 60_000)
+    });
+    prisma.bucket.findUnique.mockResolvedValue({ id: "bucket-1", name: "bucket-a" });
+
+    const result = await service.recordMultipartPart(user, "upload-session-1", {
+      partNumber: 1,
+      eTag: "etag-1-new"
+    });
+
+    expect(result.completedPartNumbers).toEqual([1, 2]);
+    expect(prisma.uploadSession.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "IN_PROGRESS",
+          completedParts: [
+            { partNumber: 1, eTag: "etag-1-new" },
+            { partNumber: 2, eTag: "etag-2" }
+          ]
+        })
+      })
+    );
+  });
+
+  it("returns recoverable multipart session with completed parts", async () => {
+    prisma.bucket.findUnique.mockResolvedValue({ id: "bucket-1", name: "bucket-a" });
+    prisma.uploadSession.findFirst.mockResolvedValue({
+      id: "upload-session-1",
+      bucketId: "bucket-1",
+      objectKey: "folder/file.txt",
+      uploadId: "upload-1",
+      status: "IN_PROGRESS",
+      partSize: 10 * 1024 * 1024,
+      totalParts: 3,
+      fileSize: BigInt(25 * 1024 * 1024),
+      contentType: "text/plain",
+      completedParts: [
+        { partNumber: 1, eTag: "etag-1" },
+        { partNumber: 2, eTag: "etag-2" }
+      ],
+      error: null,
+      createdAt: new Date("2026-04-09T10:00:00.000Z"),
+      updatedAt: new Date("2026-04-09T10:05:00.000Z"),
+      expiresAt: new Date(Date.now() + 3600_000)
+    });
+
+    const result = await service.findRecoverableSession(user, {
+      bucket: "bucket-a",
+      key: "folder/file.txt",
+      fileSize: 25 * 1024 * 1024,
+      partSize: 10 * 1024 * 1024
+    });
+
+    expect(result).toMatchObject({
+      id: "upload-session-1",
+      bucketName: "bucket-a",
+      completedPartNumbers: [1, 2],
+      completedParts: [
+        { partNumber: 1, eTag: "etag-1" },
+        { partNumber: 2, eTag: "etag-2" }
+      ]
+    });
   });
 });

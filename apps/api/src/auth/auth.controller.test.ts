@@ -13,9 +13,9 @@ const sessionService = {
 };
 
 const limiter = {
-  check: vi.fn(),
-  clear: vi.fn(),
-  registerFailure: vi.fn()
+  check: vi.fn().mockResolvedValue(undefined),
+  clear: vi.fn().mockResolvedValue(undefined),
+  registerFailure: vi.fn().mockResolvedValue(undefined)
 };
 
 const configService = {
@@ -37,6 +37,10 @@ const auditService = {
   record: vi.fn()
 };
 
+const metricsService = {
+  recordLogin: vi.fn()
+};
+
 describe("AuthController audit", () => {
   let controller: AuthController;
 
@@ -47,7 +51,8 @@ describe("AuthController audit", () => {
       sessionService as never,
       limiter as never,
       configService as never,
-      auditService as never
+      auditService as never,
+      metricsService as never
     );
   });
 
@@ -87,6 +92,7 @@ describe("AuthController audit", () => {
     expect(auditService.record).toHaveBeenCalledWith(
       expect.objectContaining({ action: "auth.login.success.local", ipAddress: "127.0.0.1" })
     );
+    expect(metricsService.recordLogin).toHaveBeenCalledWith("success", "local", expect.any(Number));
   });
 
   it("writes audit log for failed login", async () => {
@@ -109,5 +115,6 @@ describe("AuthController audit", () => {
     expect(auditService.record).toHaveBeenCalledWith(
       expect.objectContaining({ action: "auth.login.failure", ipAddress: "127.0.0.1" })
     );
+    expect(metricsService.recordLogin).toHaveBeenCalledWith("failure", "local", expect.any(Number));
   });
 });

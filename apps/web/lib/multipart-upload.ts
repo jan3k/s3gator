@@ -17,6 +17,7 @@ export interface UploadPartsOptions {
   maxRetries?: number;
   signal?: AbortSignal;
   onProgress?: (loaded: number, total: number) => void;
+  onPartComplete?: (part: CompletedPart) => Promise<void> | void;
   fetchImpl?: typeof fetch;
 }
 
@@ -70,6 +71,7 @@ export async function uploadPartsWithConcurrency(input: UploadPartsOptions): Pro
         });
 
         completed[current] = result;
+        await input.onPartComplete?.(result);
 
         const start = (part.partNumber - 1) * input.partSize;
         const end = Math.min(start + input.partSize, total);

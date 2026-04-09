@@ -8,16 +8,20 @@
   },
   "scripts": {
     "dev": "npx pnpm --parallel --filter @s3gator/api --filter @s3gator/web dev",
+    "dev:worker": "npx pnpm --filter @s3gator/api dev:worker",
     "build": "npx pnpm -r build",
     "typecheck": "npx pnpm --filter @s3gator/shared build && npx pnpm --filter @s3gator/s3 build && npx pnpm --filter @s3gator/ui build && npx pnpm -r typecheck",
     "lint": "npx pnpm -r lint",
     "test": "npx pnpm -r test",
     "test:e2e": "playwright test",
+    "test:e2e:integration": "playwright test -c playwright.integration.config.ts",
     "format": "prettier --write .",
     "db:generate": "npx pnpm --filter @s3gator/api prisma generate",
     "db:migrate": "npx pnpm --filter @s3gator/api prisma migrate dev",
     "db:seed": "npx pnpm --filter @s3gator/api seed",
-    "bootstrap": "bash ./scripts/dev-bootstrap.sh"
+    "bootstrap": "bash ./scripts/dev-bootstrap.sh",
+    "integration:up": "docker compose -f docker-compose.integration.yml up -d --build",
+    "integration:down": "docker compose -f docker-compose.integration.yml down -v"
   },
   "devDependencies": {
     "@typescript-eslint/parser": "8.58.1",

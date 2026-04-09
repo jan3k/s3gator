@@ -51,6 +51,22 @@ type UploadJob = {
   error?: string;
 };
 
+type CompletedPart = {
+  partNumber: number;
+  eTag: string;
+};
+
+type ResumableSession = {
+  id: string;
+  objectKey: string;
+  status: "INITIATED" | "IN_PROGRESS" | "FAILED" | "COMPLETED" | "ABORTED";
+  partSize: number | null;
+  completedPartNumbers: number[];
+  completedParts: CompletedPart[];
+  totalParts: number | null;
+  updatedAt: string;
+};
+
 const PART_SIZE = 10 * 1024 * 1024;
 
 export default function FilesPage() {
@@ -64,6 +80,7 @@ export default function FilesPage() {
   const [preview, setPreview] = useState<{ key: string; payload: PreviewPayload } | null>(null);
   const [uploadJobs, setUploadJobs] = useState<UploadJob[]>([]);
   const [statsText, setStatsText] = useState<string | null>(null);
+  const [operationMessage, setOperationMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const directoryInputRef = useRef<HTMLInputElement>(null);
   const uploadControllersRef = useRef(new Map<string, AbortController>());
@@ -96,6 +113,15 @@ export default function FilesPage() {
       )
   });
 
+  const resumableUploadsQuery = useQuery({
+    queryKey: ["multipart-sessions", bucket],
+    enabled: Boolean(bucket),
+    queryFn: () =>
+      apiFetch<ResumableSession[]>(
+        "/files/multipart/sessions?scope=mine&status=INITIATED,IN_PROGRESS,FAILED&limit=100"
+      )
+  });
+
   const previewMutation = useMutation({
     mutationFn: (key: string) =>
       apiFetch<PreviewPayload>(
@@ -108,23 +134,30 @@ export default function FilesPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (key: string) =>
-      apiFetch("/files", {
+      apiFetch<{ mode?: "job"; job?: { id: string } }>("/files", {
         method: "DELETE",
         body: JSON.stringify({ bucket, key })
       }),
-    onSuccess: () => {
+    onSuccess: (payload) => {
+      if (payload?.mode === "job" && payload.job?.id) {
+        setOperationMessage(`Delete queued as background job: ${payload.job.id}`);
+      }
       void queryClient.invalidateQueries({ queryKey: ["files"] });
       void queryClient.invalidateQueries({ queryKey: ["files-search"] });
+      void queryClient.invalidateQueries({ queryKey: ["multipart-sessions"] });
     }
   });
 
   const renameMutation = useMutation({
     mutationFn: (input: { oldKey: string; newKey: string }) =>
-      apiFetch("/files/rename", {
+      apiFetch<{ mode?: "job"; job?: { id: string } }>("/files/rename", {
         method: "POST",
         body: JSON.stringify({ bucket, ...input })
       }),
-    onSuccess: () => {
+    onSuccess: (payload) => {
+      if (payload?.mode === "job" && payload.job?.id) {
+        setOperationMessage(`Rename queued as background job: ${payload.job.id}`);
+      }
       void queryClient.invalidateQueries({ queryKey: ["files"] });
       void queryClient.invalidateQueries({ queryKey: ["files-search"] });
     }
@@ -150,6 +183,16 @@ export default function FilesPage() {
       setStatsText(
         `Objects: ${stats.objectCount} | Folders: ${stats.folderCount} | Size: ${formatBytes(stats.totalSize)} | Latest: ${stats.latestModified ?? "n/a"}`
       );
+    }
+  });
+
+  const abortSessionMutation = useMutation({
+    mutationFn: (uploadSessionId: string) =>
+      apiFetch(`/files/multipart/${uploadSessionId}/abort`, {
+        method: "POST"
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["multipart-sessions"] });
     }
   });
 
@@ -207,15 +250,41 @@ export default function FilesPage() {
           prev.map((job) => (job.id === jobId ? { ...job, status: "running", error: undefined } : job))
         );
 
-        const initialized = await apiFetch<{ uploadSessionId: string; uploadId: string }>("/files/multipart/init", {
+        const partSize = PART_SIZE;
+        const totalParts = Math.max(1, Math.ceil(file.size / partSize));
+        const recoverable = await apiFetch<ResumableSession | null>("/files/multipart/recover", {
           method: "POST",
           body: JSON.stringify({
             bucket,
             key,
-            contentType: file.type || undefined
+            fileSize: file.size,
+            partSize
           })
         });
-        const sessionId = initialized.uploadSessionId;
+
+        let sessionId: string;
+        const completedPartsMap = new Map<number, CompletedPart>();
+        if (recoverable) {
+          sessionId = recoverable.id;
+          for (const part of recoverable.completedParts ?? []) {
+            completedPartsMap.set(part.partNumber, part);
+          }
+        } else {
+          const initialized = await apiFetch<{ uploadSessionId: string; uploadId: string }>("/files/multipart/init", {
+            method: "POST",
+            body: JSON.stringify({
+              bucket,
+              key,
+              contentType: file.type || undefined,
+              fileSize: file.size,
+              partSize,
+              totalParts,
+              relativePath: relative
+            })
+          });
+          sessionId = initialized.uploadSessionId;
+        }
+
         uploadSessionId = sessionId;
 
         setUploadJobs((prev) =>
@@ -229,41 +298,68 @@ export default function FilesPage() {
           )
         );
 
-        const partCount = Math.max(1, Math.ceil(file.size / PART_SIZE));
-        const partNumbers = Array.from({ length: partCount }, (_, index) => index + 1);
+        const partNumbers = Array.from({ length: totalParts }, (_, index) => index + 1);
+        const missingPartNumbers = partNumbers.filter((partNumber) => !completedPartsMap.has(partNumber));
+        const alreadyUploadedBytes = calculateUploadedBytes(file.size, partSize, [...completedPartsMap.keys()]);
 
-        const signed = await apiFetch<{ parts: Array<{ partNumber: number; url: string }> }>(
-          `/files/multipart/${initialized.uploadSessionId}/sign-parts`,
-          {
-            method: "POST",
-            body: JSON.stringify({ partNumbers })
-          }
-        );
+        if (missingPartNumbers.length > 0) {
+          const signed = await apiFetch<{ parts: Array<{ partNumber: number; url: string }> }>(
+            `/files/multipart/${sessionId}/sign-parts`,
+            {
+              method: "POST",
+              body: JSON.stringify({ partNumbers: missingPartNumbers })
+            }
+          );
 
-        const completed = await uploadPartsWithConcurrency({
-          file,
-          parts: signed.parts,
-          partSize: PART_SIZE,
-          contentType: file.type || undefined,
-          concurrency: 4,
-          maxRetries: 3,
-          signal: abortController.signal,
-          onProgress: (loaded, total) => {
-            const denominator = total > 0 ? total : 1;
-            setUploadJobs((prev) =>
-              prev.map((job) =>
-                job.id === jobId
-                  ? {
-                      ...job,
-                      progress: Math.round((loaded / denominator) * 100)
-                    }
-                  : job
-              )
-            );
-          }
-        });
+          await uploadPartsWithConcurrency({
+            file,
+            parts: signed.parts,
+            partSize,
+            contentType: file.type || undefined,
+            concurrency: 4,
+            maxRetries: 3,
+            signal: abortController.signal,
+            onProgress: (loaded) => {
+              const uploaded = Math.min(file.size, alreadyUploadedBytes + loaded);
+              const denominator = file.size > 0 ? file.size : 1;
+              setUploadJobs((prev) =>
+                prev.map((job) =>
+                  job.id === jobId
+                    ? {
+                        ...job,
+                        progress: Math.round((uploaded / denominator) * 100)
+                      }
+                    : job
+                )
+              );
+            },
+            onPartComplete: async (part) => {
+              completedPartsMap.set(part.partNumber, part);
+              await apiFetch(`/files/multipart/${sessionId}/part-complete`, {
+                method: "POST",
+                body: JSON.stringify(part)
+              });
+            }
+          });
+        } else {
+          setUploadJobs((prev) =>
+            prev.map((job) =>
+              job.id === jobId
+                ? {
+                    ...job,
+                    progress: 100
+                  }
+                : job
+            )
+          );
+        }
 
-        await apiFetch(`/files/multipart/${initialized.uploadSessionId}/complete`, {
+        const completed = [...completedPartsMap.values()].sort((a, b) => a.partNumber - b.partNumber);
+        if (completed.length === 0) {
+          throw new Error("No multipart parts available to complete upload");
+        }
+
+        await apiFetch(`/files/multipart/${sessionId}/complete`, {
           method: "POST",
           body: JSON.stringify({ parts: completed })
         });
@@ -307,6 +403,7 @@ export default function FilesPage() {
     }
 
     void queryClient.invalidateQueries({ queryKey: ["files"] });
+    void queryClient.invalidateQueries({ queryKey: ["multipart-sessions"] });
   }
 
   return (
@@ -466,6 +563,41 @@ export default function FilesPage() {
 
       {statsText ? (
         <div className="mb-4 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">{statsText}</div>
+      ) : null}
+      {operationMessage ? (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          {operationMessage}
+        </div>
+      ) : null}
+
+      {resumableUploadsQuery.data?.length ? (
+        <div className="mb-4 rounded-xl border border-slate-200 bg-white p-4">
+          <h3 className="text-sm font-semibold text-slate-900">Resumable uploads</h3>
+          <div className="mt-3 space-y-2">
+            {resumableUploadsQuery.data.map((session) => (
+              <div key={session.id} className="rounded-lg border border-slate-200 p-3 text-xs text-slate-700">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium text-slate-900">{session.objectKey}</p>
+                    <p>
+                      {session.status} | {session.completedPartNumbers.length}/{session.totalParts ?? "?"} parts
+                    </p>
+                  </div>
+                  {(session.status === "INITIATED" || session.status === "IN_PROGRESS" || session.status === "FAILED") ? (
+                    <button
+                      className="rounded border border-red-300 px-2 py-1 text-[11px] text-red-700"
+                      onClick={() => {
+                        void abortSessionMutation.mutate(session.id);
+                      }}
+                    >
+                      Abort
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       ) : null}
 
       {entries.length === 0 ? (
@@ -638,4 +770,18 @@ function formatBytes(bytes: number) {
 
 function normalizeObjectKey(value: string) {
   return value.replaceAll("\\", "/").replace(/^\/+/, "");
+}
+
+function calculateUploadedBytes(fileSize: number, partSize: number, partNumbers: number[]): number {
+  return partNumbers.reduce((sum, partNumber) => {
+    if (partNumber < 1) {
+      return sum;
+    }
+    const start = (partNumber - 1) * partSize;
+    if (start >= fileSize) {
+      return sum;
+    }
+    const end = Math.min(start + partSize, fileSize);
+    return sum + Math.max(end - start, 0);
+  }, 0);
 }

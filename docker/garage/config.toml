@@ -1,0 +1,22 @@
+replication_factor = 1
+consistency_mode = "consistent"
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "lmdb"
+
+rpc_bind_addr = "0.0.0.0:3901"
+rpc_public_addr = "garage:3901"
+rpc_secret = "stage3-dev-rpc-secret-change-me"
+
+[s3_api]
+api_bind_addr = "0.0.0.0:3900"
+s3_region = "garage"
+root_domain = ".s3.localhost"
+
+[k2v_api]
+api_bind_addr = "0.0.0.0:3904"
+
+[admin]
+api_bind_addr = "0.0.0.0:3903"
+admin_token = "stage3-dev-admin-token-change-me"

@@ -90,4 +90,30 @@ describe("multipart upload helpers", () => {
     expect(completed.map((part) => part.partNumber)).toEqual([1, 2, 3]);
     expect(progressEvents.at(-1)).toEqual({ loaded: 30, total: 30 });
   });
+
+  it("invokes onPartComplete callback for each uploaded part", async () => {
+    const file = makeFile(20);
+    const onPartComplete = vi.fn();
+
+    const completed = await uploadPartsWithConcurrency({
+      file,
+      parts: [
+        { partNumber: 1, url: "https://upload.example.local/part/1" },
+        { partNumber: 2, url: "https://upload.example.local/part/2" }
+      ],
+      partSize: 10,
+      fetchImpl: vi.fn(async () =>
+        new Response("", {
+          status: 200,
+          headers: {
+            etag: '"etag"'
+          }
+        })
+      ),
+      onPartComplete
+    });
+
+    expect(completed).toHaveLength(2);
+    expect(onPartComplete).toHaveBeenCalledTimes(2);
+  });
 });

@@ -10,6 +10,21 @@ const envSchema = z.object({
   APP_ENCRYPTION_KEY: z.string().min(32),
   LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(50).default(8),
   LOGIN_WINDOW_SECONDS: z.coerce.number().int().min(30).max(86400).default(300),
+  REDIS_URL: z.string().url().default("redis://127.0.0.1:6379"),
+  REDIS_ENABLED: z
+    .union([z.boolean(), z.string()])
+    .transform((value) => (typeof value === "boolean" ? value : value === "true"))
+    .default(true),
+  REDIS_PREFIX: z.string().default("s3gator"),
+  JOB_WORKER_INLINE: z
+    .union([z.boolean(), z.string()])
+    .transform((value) => (typeof value === "boolean" ? value : value === "true"))
+    .default(false),
+  JOB_WORKER_POLL_MS: z.coerce.number().int().min(250).max(60_000).default(2000),
+  JOB_LOCK_TTL_SECONDS: z.coerce.number().int().min(5).max(3600).default(60),
+  UPLOAD_SESSION_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+  UPLOAD_PART_SIZE_BYTES: z.coerce.number().int().min(5 * 1024 * 1024).max(128 * 1024 * 1024).default(10 * 1024 * 1024),
+  UPLOAD_CLEANUP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(50),
   GARAGE_ENDPOINT: z.string().url().optional(),
   GARAGE_REGION: z.string().default("garage"),
   GARAGE_FORCE_PATH_STYLE: z

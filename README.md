@@ -26,27 +26,42 @@ S3Gator intentionally follows Garage realities:
 - Local auth (Argon2id) and LDAP auth.
 - Runtime auth mode enforcement: `local`, `ldap`, or `hybrid`.
 - Cookie session auth with CSRF protection.
+- Redis-backed distributed login throttling.
 - Role model: `SUPER_ADMIN`, `ADMIN`, `USER`.
 - Server-side user-management policy hardening:
   - only `SUPER_ADMIN` can assign/remove `SUPER_ADMIN`,
   - `ADMIN` can manage only `USER` accounts.
+- Scoped admin v2:
+  - optional `ADMIN` bucket scopes for grant and operational visibility actions,
+  - `SUPER_ADMIN` remains global bypass.
 - Per-bucket capability grants (e.g. `object:read`, `object:upload`, `folder:delete`, `search:run`).
 - Bucket visibility requires explicit `bucket:list`.
 - Bucket browsing, search, folder operations, rename/delete, stats.
-- Upload center with multipart upload orchestration, retry, and cancel.
+- Upload center with multipart upload orchestration, retry, cancel, and persisted resume metadata.
+- Background jobs (DB-persisted) for heavy operations:
+  - folder rename,
+  - folder delete,
+  - Garage bucket sync,
+  - stale multipart cleanup.
 - Presigned URL-based preview/download.
+- Operational endpoints:
+  - `GET /health/live`
+  - `GET /health/ready`
+  - `GET /metrics` (Prometheus format)
 - Admin panel:
   - users/roles,
   - bucket grants,
+  - admin scopes,
   - LDAP config,
   - Garage connection management + health checks,
+  - background jobs + upload session visibility,
   - audit logs.
 
 ## Security Highlights
 
 - Garage credentials/admin token are backend-only.
 - Secrets stored in DB are encrypted (AES-256-GCM) using `APP_ENCRYPTION_KEY`.
-- Login endpoints are rate-limited.
+- Login endpoints are Redis-backed rate-limited for multi-instance deployments.
 - API response shaping avoids encrypted ciphertext leakage for admin settings/connections.
 - Structured logging and audit metadata redaction for sensitive fields.
 - Audit trail for auth, privileged settings, grant changes, and destructive operations.
@@ -57,7 +72,7 @@ See [docs/security.md](docs/security.md) for full details.
 
 - Node.js 22+
 - pnpm 9+
-- Docker + Docker Compose (for local PostgreSQL)
+- Docker + Docker Compose (for local PostgreSQL + Redis)
 
 ## Quick Start
 
@@ -73,16 +88,19 @@ cp .env.example .env
 bash ./scripts/dev-bootstrap.sh
 ```
 
-3. Start API and web apps:
+3. Start API, web, and worker:
 
 ```bash
 npx pnpm dev
+npx pnpm dev:worker
 ```
 
 4. Open:
 
 - Web: `http://localhost:3000`
 - API Swagger: `http://localhost:4000/docs`
+- API health: `http://localhost:4000/health/live`
+- API metrics: `http://localhost:4000/metrics`
 
 ## Manual Commands
 
@@ -92,14 +110,48 @@ npx pnpm db:generate
 npx pnpm db:migrate
 npx pnpm db:seed
 npx pnpm dev
+npx pnpm dev:worker
 ```
 
 ## Test and Build
 
 ```bash
+npx pnpm lint
 npx pnpm typecheck
 npx pnpm test
+npx pnpm test:e2e
+npx pnpm test:e2e:integration
 npx pnpm build
+```
+
+## Integration Stack (Full Lane)
+
+Bring up full local integration dependencies:
+
+```bash
+npx pnpm integration:up
+```
+
+This starts:
+- PostgreSQL
+- Redis
+- Garage v2.2.0
+- API
+- Worker
+- Web
+
+Run full integration Playwright lane:
+
+```bash
+INTEGRATION_E2E=1 \
+INTEGRATION_BUCKET_NAME=<existing-garage-bucket-alias> \
+npx pnpm test:e2e:integration
+```
+
+Tear down:
+
+```bash
+npx pnpm integration:down
 ```
 
 ## Default Seed Account
@@ -117,10 +169,11 @@ Default values are in `.env.example` and should be changed immediately.
 - [docs/discovery.md](docs/discovery.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/security.md](docs/security.md)
+- [docs/stage3-plan.md](docs/stage3-plan.md)
+- [docs/operations.md](docs/operations.md)
 
 ## Known Limitations
 
-- Distributed rate limiting (e.g. Redis-backed) is not implemented yet.
-- Folder rename/delete are bounded-concurrency operations without persisted checkpoint/resume jobs.
-- Web E2E coverage includes authenticated flow baseline but is not a full regression suite.
-- Local dev compose includes PostgreSQL only; Garage is expected from your existing environment or a separate deployment.
+- Folder rename/delete are job-backed and restart-safe, but do not persist per-object checkpoints for mid-job resume.
+- Cancel requests are best-effort for long S3 operations already in-flight.
+- Full integration E2E lane assumes Garage is initialized with usable S3 credentials and at least one test bucket alias.

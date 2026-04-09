@@ -32,3 +32,45 @@ export interface PaginationQuery {
   limit?: number;
   cursor?: string | null;
 }
+
+export type JobType = "FOLDER_RENAME" | "FOLDER_DELETE" | "BUCKET_SYNC" | "UPLOAD_CLEANUP";
+export type JobStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELED";
+
+export interface JobProgress {
+  totalItems?: number;
+  processedItems?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface JobPublic {
+  id: string;
+  type: JobType;
+  status: JobStatus;
+  createdByUserId: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  cancelRequestedAt: string | null;
+  failureSummary: string | null;
+  progress: JobProgress | null;
+  result: Record<string, unknown> | null;
+}
+
+export interface UploadSessionPublic {
+  id: string;
+  bucketId: string;
+  bucketName: string;
+  objectKey: string;
+  uploadId: string;
+  status: "INITIATED" | "IN_PROGRESS" | "COMPLETED" | "ABORTED" | "FAILED";
+  partSize: number | null;
+  totalParts: number | null;
+  fileSize: string | null;
+  contentType: string | null;
+  completedPartNumbers: number[];
+  completedParts: Array<{ partNumber: number; eTag: string }>;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+}

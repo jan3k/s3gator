@@ -17,19 +17,33 @@ import {
 } from "@s3gator/s3";
 import type { BucketPermission, SessionUser } from "@s3gator/shared";
 import type { Prisma } from "@prisma/client";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "@/prisma/prisma.service.js";
 import { ConnectionsService } from "@/connections/connections.service.js";
 import { AuthorizationService } from "@/authorization/authorization.service.js";
 import { AuditService } from "@/audit/audit.service.js";
+import { MetricsService } from "@/metrics/metrics.service.js";
 
 @Injectable()
 export class FilesService {
   constructor(
+    private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly connectionsService: ConnectionsService,
     private readonly authorizationService: AuthorizationService,
-    private readonly auditService: AuditService
+    private readonly auditService: AuditService,
+    private readonly metricsService: MetricsService
   ) {}
+
+  async ensureDeletePermission(user: SessionUser, input: { bucket: string; key: string }) {
+    const permission: BucketPermission = input.key.endsWith("/") ? "folder:delete" : "object:delete";
+    await this.authorizationService.requireBucketPermission(user, input.bucket, permission);
+  }
+
+  async ensureRenamePermission(user: SessionUser, input: { bucket: string; oldKey: string; newKey: string }) {
+    const permission: BucketPermission = input.oldKey.endsWith("/") ? "folder:rename" : "object:rename";
+    await this.authorizationService.requireBucketPermission(user, input.bucket, permission);
+  }
 
   async list(user: SessionUser, input: { bucket: string; prefix: string; continuationToken?: string; recursive: boolean; pageSize: number; sortBy: "name" | "size" | "lastModified" | "type"; sortOrder: "asc" | "desc"; }) {
     await this.authorizationService.requireBucketPermission(user, input.bucket, "object:list");
@@ -62,11 +76,18 @@ export class FilesService {
   }
 
   async remove(user: SessionUser, input: { bucket: string; key: string }, ipAddress?: string) {
-    const permission: BucketPermission = input.key.endsWith("/") ? "folder:delete" : "object:delete";
-    await this.authorizationService.requireBucketPermission(user, input.bucket, permission);
+    await this.ensureDeletePermission(user, input);
 
     const s3 = await this.getS3Client();
-    const result = await deleteFileOrFolder(s3, input.key, input.bucket);
+    const startedAt = Date.now();
+    const result = await deleteFileOrFolder(s3, input.key, input.bucket).catch((error: Error) => {
+      this.metricsService.recordS3Failure(input.key.endsWith("/") ? "folder_delete" : "object_delete");
+      throw error;
+    });
+    this.metricsService.recordS3Duration(
+      input.key.endsWith("/") ? "folder_delete" : "object_delete",
+      (Date.now() - startedAt) / 1000
+    );
 
     await this.auditService.record({
       actor: user,
@@ -81,11 +102,18 @@ export class FilesService {
   }
 
   async rename(user: SessionUser, input: { bucket: string; oldKey: string; newKey: string }, ipAddress?: string) {
-    const permission: BucketPermission = input.oldKey.endsWith("/") ? "folder:rename" : "object:rename";
-    await this.authorizationService.requireBucketPermission(user, input.bucket, permission);
+    await this.ensureRenamePermission(user, input);
 
     const s3 = await this.getS3Client();
-    const result = await renameFileOrFolder(s3, input.oldKey, input.newKey, input.bucket);
+    const startedAt = Date.now();
+    const result = await renameFileOrFolder(s3, input.oldKey, input.newKey, input.bucket).catch((error: Error) => {
+      this.metricsService.recordS3Failure(input.oldKey.endsWith("/") ? "folder_rename" : "object_rename");
+      throw error;
+    });
+    this.metricsService.recordS3Duration(
+      input.oldKey.endsWith("/") ? "folder_rename" : "object_rename",
+      (Date.now() - startedAt) / 1000
+    );
 
     await this.auditService.record({
       actor: user,
@@ -129,7 +157,7 @@ export class FilesService {
 
   async initMultipartSession(
     user: SessionUser,
-    input: { bucket: string; key: string; contentType?: string }
+    input: { bucket: string; key: string; contentType?: string; fileSize?: number; partSize?: number; totalParts?: number; relativePath?: string }
   ) {
     await this.authorizationService.requireBucketPermission(user, input.bucket, "object:upload");
 
@@ -145,6 +173,14 @@ export class FilesService {
       contentType: input.contentType
     });
 
+    const partSize = input.partSize ?? this.configService.get<number>("UPLOAD_PART_SIZE_BYTES", 10 * 1024 * 1024);
+    const totalParts =
+      input.totalParts ??
+      (input.fileSize !== undefined
+        ? Math.max(1, Math.ceil(input.fileSize / Math.max(partSize, 1)))
+        : null);
+    const ttlHours = this.configService.get<number>("UPLOAD_SESSION_TTL_HOURS", 24);
+
     const session = await this.prisma.uploadSession.create({
       data: {
         userId: user.id,
@@ -152,9 +188,17 @@ export class FilesService {
         objectKey: initialized.key,
         uploadId: initialized.uploadId,
         status: "INITIATED",
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+        partSize,
+        totalParts,
+        fileSize: input.fileSize === undefined ? null : BigInt(input.fileSize),
+        contentType: input.contentType,
+        relativePath: input.relativePath,
+        lastActivityAt: new Date(),
+        expiresAt: new Date(Date.now() + ttlHours * 60 * 60 * 1000)
       }
     });
+
+    this.metricsService.recordUploadEvent("start");
 
     return {
       uploadSessionId: session.id,
@@ -186,7 +230,8 @@ export class FilesService {
       where: { id: uploadSessionId },
       data: {
         status: "IN_PROGRESS",
-        partsMeta: partNumbers,
+        partsMeta: partNumbers as unknown as Prisma.InputJsonValue,
+        lastActivityAt: new Date(),
         error: null
       }
     });
@@ -223,7 +268,9 @@ export class FilesService {
       where: { id: uploadSessionId },
       data: {
         status: "COMPLETED",
+        completedParts: parts as unknown as Prisma.InputJsonValue,
         partsMeta: parts as unknown as Prisma.InputJsonValue,
+        lastActivityAt: new Date(),
         error: null
       }
     });
@@ -236,6 +283,8 @@ export class FilesService {
       metadata: result,
       ipAddress
     });
+
+    this.metricsService.recordUploadEvent("complete");
 
     return result;
   }
@@ -261,6 +310,7 @@ export class FilesService {
       where: { id: uploadSessionId },
       data: {
         status: "ABORTED",
+        lastActivityAt: new Date(),
         error: abortError
       }
     });
@@ -275,6 +325,8 @@ export class FilesService {
       },
       ipAddress
     });
+
+    this.metricsService.recordUploadEvent("abort");
 
     return { ok: true, abortError };
   }
@@ -300,6 +352,7 @@ export class FilesService {
       where: { id: uploadSessionId },
       data: {
         status: "FAILED",
+        lastActivityAt: new Date(),
         error: errorMessage ?? abortError ?? "Multipart upload failed"
       }
     });
@@ -315,6 +368,8 @@ export class FilesService {
       },
       ipAddress
     });
+
+    this.metricsService.recordUploadEvent("fail");
 
     return {
       ok: false,
@@ -341,21 +396,258 @@ export class FilesService {
     return { ok: true };
   }
 
-  private async getUploadSessionForUser(user: SessionUser, uploadSessionId: string) {
+  async recordMultipartPart(
+    user: SessionUser,
+    uploadSessionId: string,
+    input: { partNumber: number; eTag: string }
+  ) {
+    const session = await this.getUploadSessionForUser(user, uploadSessionId);
+    const bucket = await this.prisma.bucket.findUnique({ where: { id: session.bucketId } });
+    if (!bucket) {
+      throw new NotFoundException("Bucket not found");
+    }
+    await this.authorizationService.requireBucketPermission(user, bucket.name, "object:upload");
+
+    const existing = Array.isArray(session.completedParts)
+      ? (session.completedParts as unknown as MultipartCompletePart[])
+      : [];
+
+    const dedup = new Map<number, MultipartCompletePart>();
+    for (const part of existing) {
+      dedup.set(part.partNumber, part);
+    }
+    dedup.set(input.partNumber, { partNumber: input.partNumber, eTag: input.eTag });
+
+    const completedParts = [...dedup.values()].sort((a, b) => a.partNumber - b.partNumber);
+    await this.prisma.uploadSession.update({
+      where: { id: uploadSessionId },
+      data: {
+        status: "IN_PROGRESS",
+        completedParts: completedParts as unknown as Prisma.InputJsonValue,
+        lastActivityAt: new Date()
+      }
+    });
+
+    return {
+      uploadSessionId,
+      completedPartNumbers: completedParts.map((part) => part.partNumber)
+    };
+  }
+
+  async findRecoverableSession(
+    user: SessionUser,
+    input: { bucket: string; key: string; fileSize: number; partSize: number }
+  ) {
+    await this.authorizationService.requireBucketPermission(user, input.bucket, "object:upload");
+
+    const bucket = await this.prisma.bucket.findUnique({ where: { name: input.bucket } });
+    if (!bucket) {
+      return null;
+    }
+
+    const existing = await this.prisma.uploadSession.findFirst({
+      where: {
+        userId: user.id,
+        bucketId: bucket.id,
+        objectKey: input.key,
+        status: {
+          in: ["INITIATED", "IN_PROGRESS", "FAILED"]
+        },
+        expiresAt: {
+          gt: new Date()
+        },
+        partSize: input.partSize,
+        fileSize: BigInt(input.fileSize)
+      },
+      orderBy: {
+        createdAt: "desc"
+      }
+    });
+
+    if (!existing) {
+      return null;
+    }
+
+    return this.toUploadSessionPublic(existing, bucket.name);
+  }
+
+  async listMultipartSessions(
+    user: SessionUser,
+    input: { status?: Array<"INITIATED" | "IN_PROGRESS" | "FAILED" | "COMPLETED" | "ABORTED">; scope?: "mine" | "all"; limit?: number }
+  ) {
+    const limit = Math.min(Math.max(input.limit ?? 100, 1), 500);
+    const where: Prisma.UploadSessionWhereInput = {
+      status: input.status?.length ? { in: input.status } : undefined
+    };
+
+    if (input.scope === "all" && user.role === "SUPER_ADMIN") {
+      where.user = undefined;
+    } else if (input.scope === "all" && user.role === "ADMIN") {
+      where.bucket = {
+        adminScopes: {
+          some: {
+            adminUserId: user.id
+          }
+        }
+      };
+    } else {
+      where.userId = user.id;
+    }
+
+    const sessions = await this.prisma.uploadSession.findMany({
+      where,
+      include: {
+        bucket: true
+      },
+      orderBy: {
+        updatedAt: "desc"
+      },
+      take: limit
+    });
+
+    return sessions.map((session) => this.toUploadSessionPublic(session, session.bucket.name));
+  }
+
+  async getMultipartSession(user: SessionUser, uploadSessionId: string) {
+    const session = await this.getUploadSessionForUser(user, uploadSessionId, true);
+    const bucket = await this.prisma.bucket.findUnique({ where: { id: session.bucketId } });
+    if (!bucket) {
+      throw new NotFoundException("Bucket not found");
+    }
+
+    return this.toUploadSessionPublic(session, bucket.name);
+  }
+
+  async cleanupExpiredMultipartSessions(actor: SessionUser, limit = 100) {
+    if (actor.role !== "SUPER_ADMIN" && actor.role !== "ADMIN") {
+      throw new ForbiddenException("Insufficient role");
+    }
+
+    const where: Prisma.UploadSessionWhereInput = {
+      status: {
+        in: ["INITIATED", "IN_PROGRESS"]
+      },
+      expiresAt: {
+        lt: new Date()
+      }
+    };
+
+    if (actor.role === "ADMIN") {
+      where.bucket = {
+        adminScopes: {
+          some: {
+            adminUserId: actor.id
+          }
+        }
+      };
+    }
+
+    const expired = await this.prisma.uploadSession.findMany({
+      where,
+      include: {
+        bucket: true
+      },
+      take: Math.min(Math.max(limit, 1), 500)
+    });
+
+    let cleaned = 0;
+    for (const session of expired) {
+      await this.prisma.uploadSession.update({
+        where: { id: session.id },
+        data: {
+          status: "FAILED",
+          error: "Upload session expired",
+          lastActivityAt: new Date()
+        }
+      });
+      cleaned += 1;
+    }
+
+    return {
+      cleaned,
+      totalExpired: expired.length
+    };
+  }
+
+  private async getUploadSessionForUser(user: SessionUser, uploadSessionId: string, allowPrivilegedAccess = false) {
     const session = await this.prisma.uploadSession.findUnique({ where: { id: uploadSessionId } });
     if (!session) {
       throw new NotFoundException("Upload session not found");
     }
 
-    if (user.role !== "SUPER_ADMIN" && session.userId !== user.id) {
-      throw new ForbiddenException("Upload session not owned by user");
+    if (session.userId !== user.id) {
+      const privileged = user.role === "SUPER_ADMIN" || (allowPrivilegedAccess && user.role === "ADMIN");
+      if (!privileged) {
+        throw new ForbiddenException("Upload session not owned by user");
+      }
+
+      if (user.role === "ADMIN") {
+        const scope = await this.prisma.adminBucketScope.findFirst({
+          where: {
+            adminUserId: user.id,
+            bucketId: session.bucketId
+          },
+          select: {
+            id: true
+          }
+        });
+
+        if (!scope) {
+          throw new ForbiddenException("ADMIN is not scoped to this upload session bucket");
+        }
+      }
     }
 
-    if (session.expiresAt < new Date()) {
+    if (session.expiresAt < new Date() && session.status !== "COMPLETED" && session.status !== "ABORTED") {
       throw new ForbiddenException("Upload session expired");
     }
 
     return session;
+  }
+
+  private toUploadSessionPublic(
+    session: {
+      id: string;
+      bucketId: string;
+      objectKey: string;
+      uploadId: string;
+      status: "INITIATED" | "IN_PROGRESS" | "COMPLETED" | "ABORTED" | "FAILED";
+      partSize: number | null;
+      totalParts: number | null;
+      fileSize: bigint | null;
+      contentType: string | null;
+      completedParts: Prisma.JsonValue;
+      error: string | null;
+      createdAt: Date;
+      updatedAt: Date;
+      expiresAt: Date;
+    },
+    bucketName: string
+  ) {
+    const completed = Array.isArray(session.completedParts)
+      ? (session.completedParts as unknown as Array<{ partNumber: number; eTag: string }>)
+      : [];
+
+    return {
+      id: session.id,
+      bucketId: session.bucketId,
+      bucketName,
+      objectKey: session.objectKey,
+      uploadId: session.uploadId,
+      status: session.status,
+      partSize: session.partSize,
+      totalParts: session.totalParts,
+      fileSize: session.fileSize?.toString() ?? null,
+      contentType: session.contentType,
+      completedPartNumbers: completed.map((part) => part.partNumber).sort((a, b) => a - b),
+      completedParts: completed
+        .filter((part) => Number.isInteger(part.partNumber) && typeof part.eTag === "string")
+        .sort((a, b) => a.partNumber - b.partNumber),
+      error: session.error,
+      createdAt: session.createdAt.toISOString(),
+      updatedAt: session.updatedAt.toISOString(),
+      expiresAt: session.expiresAt.toISOString()
+    };
   }
 
   private async getS3Client() {

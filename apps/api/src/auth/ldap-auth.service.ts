@@ -3,6 +3,7 @@ import { Client } from "ldapts";
 import { AppRole } from "@prisma/client";
 import { PrismaService } from "@/prisma/prisma.service.js";
 import { CryptoService } from "@/common/crypto.service.js";
+import { MetricsService } from "@/metrics/metrics.service.js";
 
 interface LdapAuthResult {
   username: string;
@@ -15,7 +16,8 @@ interface LdapAuthResult {
 export class LdapAuthService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly cryptoService: CryptoService
+    private readonly cryptoService: CryptoService,
+    private readonly metricsService: MetricsService
   ) {}
 
   async authenticate(username: string, password: string): Promise<LdapAuthResult> {
@@ -93,6 +95,9 @@ export class LdapAuthService {
         displayName,
         role
       };
+    } catch (error) {
+      this.metricsService.recordLdapFailure(error instanceof Error ? error.message : "unknown");
+      throw error;
     } finally {
       await client.unbind().catch(() => undefined);
     }
