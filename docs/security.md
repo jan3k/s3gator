@@ -56,6 +56,12 @@ Stage 4 also adds `job_events` timeline persistence for operator diagnostics:
 - domain-step events with structured metadata,
 - correlation IDs for cross-runtime traceability.
 
+Stage 5 adds:
+
+- explicit retry/reclaim timeline events (`retry_*`, `reclaimed`),
+- retained/cleanup operational lifecycle controls for `job_events` and `audit_logs`,
+- longer retention window for security-relevant audit actions vs general audit noise.
+
 ## Correlation IDs and Telemetry Security
 
 - API assigns/propagates request correlation IDs (`x-request-id` by default).
@@ -73,3 +79,4 @@ Stage 4 also adds `job_events` timeline persistence for operator diagnostics:
 - Fine-grained object-level ABAC beyond bucket capabilities is not implemented.
 - Job cancellation is best-effort when underlying S3 calls are already in-flight.
 - Full SIEM export pipeline is out of scope by default (logs/metrics/traces hooks are available).
+- Retention currently uses hard-delete windows (no archival table tier), so operators should export logs/events externally when longer-term retention is required.

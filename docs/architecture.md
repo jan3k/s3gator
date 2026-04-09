@@ -1,4 +1,4 @@
-# Architecture: Stage 4 (Bootstrap, Timeline, Telemetry)
+# Architecture: Stage 5 (Retention, Retry, Reliability)
 
 Date: 2026-04-09
 
@@ -32,24 +32,41 @@ Recommended production topology:
   - `ADMIN`: constrained by optional admin-bucket scopes for operational/grant actions
   - `USER`: explicit per-bucket grants only
 
-## Jobs and Timeline Model
+## Jobs, Retry, and Timeline Model
 
 ## Persistent job state
 
 `jobs` table persists:
 
-- `type`: `FOLDER_RENAME`, `FOLDER_DELETE`, `BUCKET_SYNC`, `UPLOAD_CLEANUP`
+- `type`: `FOLDER_RENAME`, `FOLDER_DELETE`, `BUCKET_SYNC`, `UPLOAD_CLEANUP`, `RETENTION_CLEANUP`
 - `status`: `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELED`
 - actor and timing metadata
 - progress/result/failure summaries
 - cancellation metadata
 - `correlationId` for cross-runtime tracing
+- retry metadata:
+  - `attemptCount`
+  - `maxAttempts`
+  - `retryable`
+  - `nextRetryAt`
+  - `lastError`
+
+Retry policy by job type:
+
+- retryable:
+  - `BUCKET_SYNC`
+  - `UPLOAD_CLEANUP`
+  - `RETENTION_CLEANUP`
+- non-retryable:
+  - `FOLDER_RENAME`
+  - `FOLDER_DELETE`
 
 ## Event timeline
 
 `job_events` table stores structured lifecycle and domain-step history:
 
 - core events: `created`, `claimed`, `started`, `progress`, `canceled_requested`, `canceled`, `failed`, `completed`
+- retry/reclaim events: `retry_scheduled`, `retry_started`, `retry_exhausted`, `retry_skipped_non_retryable`, `reclaimed`
 - domain events: e.g. `folder_rename.started`, `bucket_sync.progress`, `upload_cleanup.item_processed`
 - event fields: `jobId`, `createdAt`, `level`, `type`, `message`, `metadata`, optional `correlationId`
 
@@ -59,11 +76,31 @@ This is intentionally eventful but bounded; events are meaningful operator diagn
 
 - Worker claims queued jobs with DB transition + Redis lock.
 - Jobs are restart-safe at job-level (reclaimable if stale lock).
+- Reclaimed stale runs are explicitly marked in timeline (`reclaimed`) and metrics.
 - Cancellation is best-effort:
   - cancel request is persisted,
   - worker checks cancellation between steps/batches,
   - in-flight S3 operations may complete before stop.
 - Timeline events explicitly capture cancellation request/observation behavior.
+- Retry scheduling is explicit:
+  - retryable failures move back to `QUEUED` with `nextRetryAt`,
+  - destructive job failures are terminal without retry.
+
+## Operational Retention
+
+Stage 5 adds retention maintenance for operational tables:
+
+- `job_events` (different windows for completed/canceled vs failed jobs)
+- `audit_logs` (general vs security-relevant windows)
+- old terminal jobs
+- old terminal upload sessions
+
+Current strategy is hard-delete retention windows (no archive table tier).
+
+Retention is executable via:
+
+- queued maintenance job (`RETENTION_CLEANUP`),
+- direct maintenance command (`pnpm maintenance:retention`).
 
 ## Multipart Upload Durability
 
@@ -96,6 +133,11 @@ Redis can be disabled in local-only paths, but production should keep it enabled
 
 - `GET /metrics` (Prometheus)
 - includes login, upload, job, S3 failure, LDAP failure metrics
+- Stage 5 adds retry/reclaim/retention metric families:
+  - `s3gator_job_retries_total`
+  - `s3gator_job_reclaims_total`
+  - `s3gator_retention_cleanup_total`
+  - `s3gator_retention_deleted_records_total`
 
 ## Health
 
@@ -127,8 +169,17 @@ Redis can be disabled in local-only paths, but production should keep it enabled
 
 Bootstrap script (`scripts/integration-bootstrap.mjs`) makes integration deterministic by initializing Garage layout/key/bucket/alias, verifying app connectivity, and running bucket sync.
 
+Stage 5 reliability lane (`integration:reliability`) adds real restart/reclaim validation:
+
+1. queue long-running rename job,
+2. interrupt worker container,
+3. wait lock expiry,
+4. restart worker,
+5. verify reclaim + single terminal completion via timeline/API.
+
 ## Honest Boundaries
 
 - No ACL/policy/versioning abstraction is introduced (Garage constraints respected).
 - Rename/delete durability is job-level, not per-object checkpoint resume.
 - Job cancellation remains best-effort for in-flight long operations.
+- Retention currently uses hard delete windows rather than archive-table tiering.

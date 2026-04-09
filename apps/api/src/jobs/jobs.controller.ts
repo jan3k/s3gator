@@ -5,6 +5,7 @@ import type { AuthenticatedRequest } from "@/common/request-context.js";
 import { RoleGuard } from "@/authorization/role.guard.js";
 import { RequireRoles } from "@/authorization/role.decorator.js";
 import { JobsService } from "./jobs.service.js";
+import { JobRetentionService } from "./job-retention.service.js";
 
 const listSchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
@@ -17,7 +18,10 @@ const eventsQuerySchema = z.object({
 
 @Controller("jobs")
 export class JobsController {
-  constructor(private readonly jobsService: JobsService) {}
+  constructor(
+    private readonly jobsService: JobsService,
+    private readonly retentionService: JobRetentionService
+  ) {}
 
   @Get()
   list(@CurrentUser() actor: AuthenticatedRequest["user"], @Query() query: unknown) {
@@ -87,6 +91,31 @@ export class JobsController {
     }
 
     return this.jobsService.enqueueUploadCleanup({
+      actor,
+      reason: "manual",
+      correlationId: req.correlationId
+    });
+  }
+
+  @Get("maintenance/retention-policy")
+  @UseGuards(RoleGuard)
+  @RequireRoles("SUPER_ADMIN", "ADMIN")
+  retentionPolicy() {
+    return this.retentionService.getPolicy();
+  }
+
+  @Post("maintenance/retention-cleanup")
+  @UseGuards(RoleGuard)
+  @RequireRoles("SUPER_ADMIN")
+  queueRetentionCleanup(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Req() req: AuthenticatedRequest
+  ) {
+    if (!actor) {
+      return null;
+    }
+
+    return this.jobsService.enqueueRetentionCleanup({
       actor,
       reason: "manual",
       correlationId: req.correlationId

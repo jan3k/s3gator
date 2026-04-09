@@ -16,6 +16,7 @@ import { ConnectionsService } from "@/connections/connections.service.js";
 import { MetricsService } from "@/metrics/metrics.service.js";
 import { runWithRequestContext } from "@/common/request-context.js";
 import { JobsService } from "./jobs.service.js";
+import { JobRetentionService } from "./job-retention.service.js";
 
 const actorSchema = z.object({
   id: z.string(),
@@ -54,6 +55,12 @@ const uploadCleanupPayloadSchema = z.object({
   correlationId: z.string().optional()
 });
 
+const retentionCleanupPayloadSchema = z.object({
+  actor: actorSchema,
+  reason: z.enum(["manual", "scheduled"]).default("manual"),
+  correlationId: z.string().optional()
+});
+
 class JobCanceledError extends Error {
   constructor() {
     super("Job canceled");
@@ -77,6 +84,7 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly configService: ConfigService,
     private readonly jobsService: JobsService,
+    private readonly retentionService: JobRetentionService,
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
     private readonly connectionsService: ConnectionsService,
@@ -193,8 +201,10 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
         result = await this.executeFolderDelete(job, correlationId);
       } else if (job.type === "BUCKET_SYNC") {
         result = await this.executeBucketSync(job, correlationId);
-      } else {
+      } else if (job.type === "UPLOAD_CLEANUP") {
         result = await this.executeUploadCleanup(job);
+      } else {
+        result = await this.executeRetentionCleanup(job, correlationId);
       }
 
       await this.jobsService.markCompleted(job.id, result);
@@ -205,6 +215,9 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
         span.setStatus({ code: SpanStatusCode.OK });
       } else {
         const message = (error as Error).message;
+        if (job.type === "RETENTION_CLEANUP") {
+          this.metricsService.recordRetentionCleanup("failure");
+        }
         await this.jobsService.recordEvent(job.id, {
           type: "step_error",
           level: "ERROR",
@@ -607,6 +620,64 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
       cleaned: processed,
       totalExpired: expired.length
     };
+  }
+
+  private async executeRetentionCleanup(job: Job, correlationId: string): Promise<Record<string, unknown>> {
+    const payload = retentionCleanupPayloadSchema.parse(job.payload);
+    const actor = payload.actor satisfies SessionUser;
+
+    await this.jobsService.recordEvent(job.id, {
+      type: "retention_cleanup.started",
+      message: "Retention cleanup started.",
+      metadata: {
+        reason: payload.reason
+      }
+    });
+
+    await this.throwIfCancelRequested(job.id, "before_retention_cleanup");
+
+    const summary = await this.retentionService.runCleanup();
+
+    await this.throwIfCancelRequested(job.id, "after_retention_cleanup");
+
+    await this.jobsService.markProgress(
+      job.id,
+      {
+        metadata: {
+          deleted: summary.deleted,
+          thresholds: summary.thresholds
+        }
+      },
+      {
+        emitEvent: true,
+        message: "Retention cleanup summary recorded."
+      }
+    );
+
+    await this.jobsService.recordEvent(job.id, {
+      type: "retention_cleanup.completed_step",
+      message: "Retention cleanup completed.",
+      metadata: {
+        reason: payload.reason,
+        deleted: summary.deleted
+      }
+    });
+
+    await this.auditService.record({
+      actor,
+      action: "maintenance.retention.cleanup",
+      entityType: "maintenance",
+      entityId: job.id,
+      metadata: {
+        mode: "job",
+        jobId: job.id,
+        correlationId,
+        reason: payload.reason,
+        deleted: summary.deleted
+      }
+    });
+
+    return summary as unknown as Record<string, unknown>;
   }
 
   private async getS3Client() {

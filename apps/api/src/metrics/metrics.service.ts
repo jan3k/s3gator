@@ -18,11 +18,15 @@ export class MetricsService {
 
   private readonly jobCounter: Counter<"type" | "status">;
   private readonly jobLatency: Histogram<"type" | "status">;
+  private readonly jobRetryCounter: Counter<"type" | "event">;
+  private readonly jobReclaimCounter: Counter<"type">;
 
   private readonly s3FailureCounter: Counter<"operation">;
   private readonly s3Latency: Histogram<"operation">;
 
   private readonly ldapFailureCounter: Counter<"reason">;
+  private readonly retentionCleanupCounter: Counter<"result">;
+  private readonly retentionDeletedCounter: Counter<"entity">;
 
   constructor() {
     collectDefaultMetrics({
@@ -75,6 +79,20 @@ export class MetricsService {
       registers: [this.registry]
     });
 
+    this.jobRetryCounter = new Counter({
+      name: "s3gator_job_retries_total",
+      help: "Job retry scheduling/exhaustion events",
+      labelNames: ["type", "event"],
+      registers: [this.registry]
+    });
+
+    this.jobReclaimCounter = new Counter({
+      name: "s3gator_job_reclaims_total",
+      help: "Jobs reclaimed after stale running state",
+      labelNames: ["type"],
+      registers: [this.registry]
+    });
+
     this.s3FailureCounter = new Counter({
       name: "s3gator_s3_failures_total",
       help: "S3 operation failures",
@@ -94,6 +112,20 @@ export class MetricsService {
       name: "s3gator_ldap_auth_failures_total",
       help: "LDAP authentication failures",
       labelNames: ["reason"],
+      registers: [this.registry]
+    });
+
+    this.retentionCleanupCounter = new Counter({
+      name: "s3gator_retention_cleanup_total",
+      help: "Retention cleanup runs by result",
+      labelNames: ["result"],
+      registers: [this.registry]
+    });
+
+    this.retentionDeletedCounter = new Counter({
+      name: "s3gator_retention_deleted_records_total",
+      help: "Retention cleanup deleted record counters",
+      labelNames: ["entity"],
       registers: [this.registry]
     });
   }
@@ -119,6 +151,14 @@ export class MetricsService {
     }
   }
 
+  recordJobRetryEvent(type: string, event: "scheduled" | "started" | "exhausted" | "skipped_non_retryable"): void {
+    this.jobRetryCounter.inc({ type, event });
+  }
+
+  recordJobReclaim(type: string): void {
+    this.jobReclaimCounter.inc({ type });
+  }
+
   recordS3Failure(operation: string): void {
     this.s3FailureCounter.inc({ operation });
   }
@@ -129,6 +169,17 @@ export class MetricsService {
 
   recordLdapFailure(reason: string): void {
     this.ldapFailureCounter.inc({ reason: normalizeLabelValue(reason) });
+  }
+
+  recordRetentionCleanup(result: "success" | "failure"): void {
+    this.retentionCleanupCounter.inc({ result });
+  }
+
+  recordRetentionDeleted(entity: "job_events" | "audit_logs" | "jobs" | "upload_sessions", count: number): void {
+    if (count <= 0) {
+      return;
+    }
+    this.retentionDeletedCounter.inc({ entity }, count);
   }
 
   async renderMetrics(): Promise<string> {

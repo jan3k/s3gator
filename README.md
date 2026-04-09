@@ -34,8 +34,13 @@ S3Gator intentionally follows Garage realities:
   - folder rename,
   - folder delete,
   - Garage bucket sync,
-  - stale multipart cleanup.
+  - stale multipart cleanup,
+  - operational retention cleanup.
+- Policy-driven retries for retryable jobs (`BUCKET_SYNC`, `UPLOAD_CLEANUP`, `RETENTION_CLEANUP`) with bounded backoff.
+- Non-retryable destructive jobs (`FOLDER_RENAME`, `FOLDER_DELETE`) to avoid unsafe duplicate destructive execution.
 - Persistent job timeline events (`job_events`) with structured metadata.
+- Job retry/reclaim visibility in API and admin UI (`attemptCount`, `maxAttempts`, `nextRetryAt`, retry exhaustion events).
+- Operational data retention controls for `job_events`, `audit_logs`, terminal jobs, and terminal upload sessions.
 - Resumable multipart upload sessions with persisted part state.
 - Prometheus metrics + health endpoints.
 - Correlation IDs + OpenTelemetry hooks for API and worker paths.
@@ -117,6 +122,12 @@ Run full backend-integrated Playwright lane:
 npx pnpm integration:test
 ```
 
+Run worker restart/reclaim reliability validation lane:
+
+```bash
+npx pnpm integration:reliability
+```
+
 Re-run bootstrap only:
 
 ```bash
@@ -127,6 +138,12 @@ Tear down integration stack:
 
 ```bash
 npx pnpm integration:down
+```
+
+Run direct retention cleanup maintenance command:
+
+```bash
+npx pnpm maintenance:retention
 ```
 
 ## Default Seed Account
@@ -148,12 +165,17 @@ Change defaults immediately outside local development.
 - [docs/garage-bootstrap.md](docs/garage-bootstrap.md)
 - [docs/integration-testing.md](docs/integration-testing.md)
 - [docs/telemetry.md](docs/telemetry.md)
+- [docs/data-retention.md](docs/data-retention.md)
+- [docs/reliability.md](docs/reliability.md)
+- [docs/slo-sli.md](docs/slo-sli.md)
 - [docs/stage2-hardening-plan.md](docs/stage2-hardening-plan.md)
 - [docs/stage3-plan.md](docs/stage3-plan.md)
 - [docs/stage4-plan.md](docs/stage4-plan.md)
+- [docs/stage5-plan.md](docs/stage5-plan.md)
 
 ## Known Limitations
 
 - Folder rename/delete jobs are durable and restart-safe, but there is no per-object checkpoint resume inside a running rename/delete operation.
 - Job cancel is best-effort and may wait for in-flight S3 calls to finish before stopping.
 - Garage bootstrap automation is designed for dev/integration/CI environments and should not be used as-is for production secret lifecycle management.
+- Retention currently uses hard-delete windows (no archive table tier in Stage 5).

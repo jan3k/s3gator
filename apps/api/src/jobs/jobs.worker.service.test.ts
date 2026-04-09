@@ -36,6 +36,11 @@ const jobsService = {
   recordEvent: vi.fn()
 };
 
+const retentionService = {
+  runCleanup: vi.fn(),
+  getPolicy: vi.fn()
+};
+
 const prisma = {
   bucket: {
     upsert: vi.fn()
@@ -68,6 +73,7 @@ describe("JobsWorkerService", () => {
     service = new JobsWorkerService(
       configService as never,
       jobsService as never,
+      retentionService as never,
       prisma as never,
       auditService as never,
       connectionsService as never,
@@ -135,6 +141,55 @@ describe("JobsWorkerService", () => {
       expect.objectContaining({
         deleted: 2,
         mode: "job"
+      })
+    );
+  });
+
+  it("processes retention cleanup job and records maintenance audit", async () => {
+    jobsService.claimNext.mockResolvedValue({
+      id: "job-ret-1",
+      type: "RETENTION_CLEANUP",
+      payload: {
+        actor: {
+          id: "super-1",
+          username: "root",
+          email: "root@example.com",
+          displayName: "Root",
+          role: "SUPER_ADMIN"
+        },
+        reason: "manual"
+      }
+    });
+    jobsService.isCancelRequested.mockResolvedValue(false);
+    retentionService.runCleanup.mockResolvedValue({
+      deleted: {
+        jobEventsCompletedCanceled: 1,
+        jobEventsFailed: 1,
+        auditLogsGeneral: 2,
+        auditLogsSecurity: 0,
+        jobsCompletedCanceled: 1,
+        jobsFailed: 0,
+        uploadSessions: 3
+      }
+    });
+
+    await service.runOnce();
+
+    expect(retentionService.runCleanup).toHaveBeenCalledTimes(1);
+    expect(jobsService.recordEvent).toHaveBeenCalledWith(
+      "job-ret-1",
+      expect.objectContaining({ type: "retention_cleanup.started" })
+    );
+    expect(auditService.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "maintenance.retention.cleanup",
+        entityId: "job-ret-1"
+      })
+    );
+    expect(jobsService.markCompleted).toHaveBeenCalledWith(
+      "job-ret-1",
+      expect.objectContaining({
+        deleted: expect.any(Object)
       })
     );
   });

@@ -40,9 +40,14 @@ type Connection = {
 
 type Job = {
   id: string;
-  type: "FOLDER_RENAME" | "FOLDER_DELETE" | "BUCKET_SYNC" | "UPLOAD_CLEANUP";
+  type: "FOLDER_RENAME" | "FOLDER_DELETE" | "BUCKET_SYNC" | "UPLOAD_CLEANUP" | "RETENTION_CLEANUP";
   status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELED";
   correlationId: string | null;
+  attemptCount: number;
+  maxAttempts: number;
+  retryable: boolean;
+  nextRetryAt: string | null;
+  lastError: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -95,6 +100,15 @@ type Grant = {
 
 type AuthModeResponse = {
   mode: "local" | "ldap" | "hybrid";
+};
+
+type RetentionPolicy = {
+  jobEventsDays: number;
+  failedJobDays: number;
+  terminalJobDays: number;
+  auditLogDays: number;
+  securityAuditDays: number;
+  uploadSessionDays: number;
 };
 
 export default function AdminPage() {
@@ -163,6 +177,11 @@ export default function AdminPage() {
     queryKey: ["jobs", "detail", selectedJobId],
     queryFn: () => apiFetch<JobDetail>(`/jobs/${selectedJobId}/detail?limit=400`),
     enabled: Boolean(selectedJobId) && (meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN")
+  });
+  const retentionPolicyQuery = useQuery({
+    queryKey: ["jobs", "retention-policy"],
+    queryFn: () => apiFetch<RetentionPolicy>("/jobs/maintenance/retention-policy"),
+    enabled: meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN"
   });
 
   const uploadSessionsQuery = useQuery({
@@ -338,6 +357,14 @@ export default function AdminPage() {
     mutationFn: () => apiFetch("/jobs/maintenance/upload-cleanup", { method: "POST" }),
     onSuccess: () => {
       setStatusMessage("Upload cleanup job queued");
+      void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
+    }
+  });
+
+  const queueRetentionCleanupMutation = useMutation({
+    mutationFn: () => apiFetch("/jobs/maintenance/retention-cleanup", { method: "POST" }),
+    onSuccess: () => {
+      setStatusMessage("Retention cleanup job queued");
       void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
     }
   });
@@ -713,19 +740,36 @@ export default function AdminPage() {
         <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-base font-semibold text-slate-900">Background jobs</h2>
-            <button
-              className="rounded border border-slate-300 px-3 py-2 text-xs"
-              onClick={() => {
-                void queueUploadCleanupMutation.mutate();
-              }}
-            >
-              Queue upload cleanup
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                className="rounded border border-slate-300 px-3 py-2 text-xs"
+                onClick={() => {
+                  void queueUploadCleanupMutation.mutate();
+                }}
+              >
+                Queue upload cleanup
+              </button>
+              {meQuery.data?.user?.role === "SUPER_ADMIN" ? (
+                <button
+                  className="rounded border border-slate-300 px-3 py-2 text-xs"
+                  onClick={() => {
+                    void queueRetentionCleanupMutation.mutate();
+                  }}
+                >
+                  Queue retention cleanup
+                </button>
+              ) : null}
+            </div>
           </div>
 
           <p className="mb-2 text-xs text-slate-500">
             Cancel is best-effort. In-flight S3 requests may complete before worker cancellation checkpoints.
           </p>
+          {retentionPolicyQuery.data ? (
+            <p className="mb-2 text-xs text-slate-500">
+              Retention defaults: job events {retentionPolicyQuery.data.jobEventsDays}d / failed jobs {retentionPolicyQuery.data.failedJobDays}d / audit {retentionPolicyQuery.data.auditLogDays}d.
+            </p>
+          ) : null}
 
           <div className="max-h-80 overflow-auto rounded border border-slate-200">
             <table className="min-w-full text-xs">
@@ -733,7 +777,9 @@ export default function AdminPage() {
                 <tr>
                   <th className="px-3 py-2">Type</th>
                   <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2">Attempts</th>
                   <th className="px-3 py-2">Progress</th>
+                  <th className="px-3 py-2">Next retry</th>
                   <th className="px-3 py-2">Failure</th>
                   <th className="px-3 py-2">Correlation</th>
                   <th className="px-3 py-2">Created</th>
@@ -749,11 +795,16 @@ export default function AdminPage() {
                     <td className="px-3 py-2">{job.type}</td>
                     <td className="px-3 py-2">{job.status}</td>
                     <td className="px-3 py-2">
+                      {job.attemptCount}/{job.maxAttempts}
+                      {!job.retryable ? " (no)" : ""}
+                    </td>
+                    <td className="px-3 py-2">
                       {job.progress?.processedItems !== undefined
                         ? `${job.progress.processedItems}/${job.progress.totalItems ?? "?"}`
                         : "-"}
                     </td>
-                    <td className="px-3 py-2">{job.failureSummary ?? "-"}</td>
+                    <td className="px-3 py-2">{job.nextRetryAt ?? "-"}</td>
+                    <td className="px-3 py-2">{job.failureSummary ?? job.lastError ?? "-"}</td>
                     <td className="max-w-52 truncate px-3 py-2 font-mono text-[11px]">{job.correlationId ?? "-"}</td>
                     <td className="px-3 py-2">{job.createdAt}</td>
                     <td className="px-3 py-2 space-x-1">
@@ -798,8 +849,11 @@ export default function AdminPage() {
                   <div className="mt-3 space-y-2">
                     <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
                       <div>Status: {jobDetailQuery.data.job.status}</div>
+                      <div>Retryable: {jobDetailQuery.data.job.retryable ? "yes" : "no"}</div>
+                      <div>Attempts: {jobDetailQuery.data.job.attemptCount}/{jobDetailQuery.data.job.maxAttempts}</div>
+                      <div>Next retry at: {jobDetailQuery.data.job.nextRetryAt ?? "-"}</div>
                       <div>Correlation ID: <span className="font-mono">{jobDetailQuery.data.job.correlationId ?? "-"}</span></div>
-                      <div>Failure: {jobDetailQuery.data.job.failureSummary ?? "-"}</div>
+                      <div>Failure: {jobDetailQuery.data.job.failureSummary ?? jobDetailQuery.data.job.lastError ?? "-"}</div>
                     </div>
                     <div className="max-h-64 overflow-auto rounded border border-slate-200">
                       <table className="min-w-full text-xs">

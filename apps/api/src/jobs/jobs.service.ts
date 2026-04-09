@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { JobEventLevel, JobType, type Job, type JobEvent, type Prisma } from "@prisma/client";
 import type { JobDetailPublic, JobEventPublic, JobPublic, SessionUser } from "@s3gator/shared";
 import { randomUUID } from "node:crypto";
@@ -36,6 +37,12 @@ export interface UploadCleanupJobPayload {
   correlationId?: string;
 }
 
+export interface RetentionCleanupJobPayload {
+  actor: SessionUser;
+  reason: "manual" | "scheduled";
+  correlationId?: string;
+}
+
 interface JobEventInput {
   type: string;
   message: string;
@@ -44,9 +51,16 @@ interface JobEventInput {
   correlationId?: string | null;
 }
 
+interface JobRetryPolicy {
+  retryable: boolean;
+  maxAttempts: number;
+  baseBackoffSeconds: number;
+}
+
 @Injectable()
 export class JobsService {
   constructor(
+    private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly redisService: RedisService,
     private readonly metricsService: MetricsService
@@ -66,6 +80,10 @@ export class JobsService {
 
   async enqueueUploadCleanup(payload: UploadCleanupJobPayload): Promise<JobPublic> {
     return this.enqueue("UPLOAD_CLEANUP", payload, payload.actor.id, payload.correlationId);
+  }
+
+  async enqueueRetentionCleanup(payload: RetentionCleanupJobPayload): Promise<JobPublic> {
+    return this.enqueue("RETENTION_CLEANUP", payload, payload.actor.id, payload.correlationId);
   }
 
   async list(actor: SessionUser, input: { limit?: number; scope?: "mine" | "all" }) {
@@ -171,7 +189,8 @@ export class JobsService {
         data: {
           status: "CANCELED",
           cancelRequestedAt: now,
-          completedAt: now
+          completedAt: now,
+          nextRetryAt: null
         }
       });
 
@@ -220,11 +239,15 @@ export class JobsService {
 
   async claimNext(workerId: string, lockTtlSeconds: number): Promise<Job | null> {
     const staleBefore = new Date(Date.now() - lockTtlSeconds * 1000);
+    const now = new Date();
 
     const candidate = await this.prisma.job.findFirst({
       where: {
         OR: [
-          { status: "QUEUED" },
+          {
+            status: "QUEUED",
+            OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: now } }]
+          },
           {
             status: "RUNNING",
             lockedAt: { lt: staleBefore }
@@ -249,12 +272,14 @@ export class JobsService {
       return null;
     }
 
-    const now = new Date();
     const updateResult = await this.prisma.job.updateMany({
       where: {
         id: candidate.id,
         OR: [
-          { status: "QUEUED" },
+          {
+            status: "QUEUED",
+            OR: [{ nextRetryAt: null }, { nextRetryAt: { lte: now } }]
+          },
           {
             status: "RUNNING",
             lockedAt: {
@@ -267,7 +292,11 @@ export class JobsService {
         status: "RUNNING",
         startedAt: candidate.startedAt ?? now,
         lockedAt: now,
-        lockKey: lockToken
+        lockKey: lockToken,
+        nextRetryAt: null,
+        attemptCount: {
+          increment: 1
+        }
       }
     });
 
@@ -281,19 +310,49 @@ export class JobsService {
       return null;
     }
 
+    const reclaimedStaleRun = candidate.status === "RUNNING";
     await this.createEvent(claimed, {
       type: "claimed",
       message: "Job claimed by worker.",
       metadata: {
         workerId,
-        reclaimedStaleRun: candidate.status === "RUNNING"
+        reclaimedStaleRun,
+        attemptCount: claimed.attemptCount,
+        maxAttempts: claimed.maxAttempts
       }
     });
+    if (reclaimedStaleRun) {
+      this.metricsService.recordJobReclaim(claimed.type);
+      await this.createEvent(claimed, {
+        type: "reclaimed",
+        level: "WARN",
+        message: "Stale running job reclaimed by worker after lock timeout.",
+        metadata: {
+          workerId,
+          attemptCount: claimed.attemptCount,
+          staleBefore: staleBefore.toISOString()
+        }
+      });
+    }
+    if (claimed.attemptCount > 1) {
+      this.metricsService.recordJobRetryEvent(claimed.type, "started");
+      await this.createEvent(claimed, {
+        type: "retry_started",
+        level: "WARN",
+        message: "Retry attempt started.",
+        metadata: {
+          workerId,
+          attemptCount: claimed.attemptCount,
+          maxAttempts: claimed.maxAttempts
+        }
+      });
+    }
     await this.createEvent(claimed, {
       type: "started",
       message: "Job execution started.",
       metadata: {
-        workerId
+        workerId,
+        attemptCount: claimed.attemptCount
       }
     });
 
@@ -334,6 +393,8 @@ export class JobsService {
       data: {
         status: "COMPLETED",
         completedAt: now,
+        nextRetryAt: null,
+        lastError: null,
         result: result as Prisma.InputJsonValue | undefined
       }
     });
@@ -346,7 +407,9 @@ export class JobsService {
       message: "Job completed.",
       metadata: {
         durationSeconds,
-        hasResult: result !== undefined
+        hasResult: result !== undefined,
+        attemptCount: completed.attemptCount,
+        maxAttempts: completed.maxAttempts
       }
     });
 
@@ -359,18 +422,84 @@ export class JobsService {
       return;
     }
 
+    const truncatedError = error.slice(0, 2000);
     const now = new Date();
+    const shouldRetry = existing.retryable && existing.attemptCount < existing.maxAttempts;
+
+    if (shouldRetry) {
+      const delaySeconds = this.computeBackoffSeconds(existing.type, existing.attemptCount);
+      const nextRetryAt = new Date(now.getTime() + delaySeconds * 1000);
+
+      const retryScheduled = await this.prisma.job.update({
+        where: { id: jobId },
+        data: {
+          status: "QUEUED",
+          completedAt: null,
+          lockKey: null,
+          lockedAt: null,
+          nextRetryAt,
+          lastError: truncatedError,
+          failureSummary: truncatedError
+        }
+      });
+
+      this.metricsService.recordJobRetryEvent(existing.type, "scheduled");
+
+      await this.createEvent(retryScheduled, {
+        type: "retry_scheduled",
+        level: "WARN",
+        message: "Job failed and retry was scheduled.",
+        metadata: {
+          attemptCount: existing.attemptCount,
+          maxAttempts: existing.maxAttempts,
+          nextRetryAt: nextRetryAt.toISOString(),
+          delaySeconds,
+          error: truncatedError
+        }
+      });
+
+      await this.releaseJobLock(existing);
+      return;
+    }
+
     const failed = await this.prisma.job.update({
       where: { id: jobId },
       data: {
         status: "FAILED",
         completedAt: now,
-        failureSummary: error.slice(0, 2000)
+        nextRetryAt: null,
+        lastError: truncatedError,
+        failureSummary: truncatedError
       }
     });
 
     const durationSeconds = failed.startedAt ? (now.getTime() - failed.startedAt.getTime()) / 1000 : undefined;
     this.metricsService.recordJobEvent(failed.type, "fail", durationSeconds);
+
+    if (failed.retryable) {
+      this.metricsService.recordJobRetryEvent(failed.type, "exhausted");
+      await this.createEvent(failed, {
+        type: "retry_exhausted",
+        level: "ERROR",
+        message: "Retry attempts exhausted; job marked failed.",
+        metadata: {
+          attemptCount: failed.attemptCount,
+          maxAttempts: failed.maxAttempts,
+          error: truncatedError
+        }
+      });
+    } else {
+      this.metricsService.recordJobRetryEvent(failed.type, "skipped_non_retryable");
+      await this.createEvent(failed, {
+        type: "retry_skipped_non_retryable",
+        level: "WARN",
+        message: "Retry skipped because job type is non-retryable.",
+        metadata: {
+          attemptCount: failed.attemptCount,
+          maxAttempts: failed.maxAttempts
+        }
+      });
+    }
 
     await this.createEvent(failed, {
       type: "failed",
@@ -378,11 +507,13 @@ export class JobsService {
       message: "Job failed.",
       metadata: {
         durationSeconds,
-        error: error.slice(0, 2000)
+        attemptCount: failed.attemptCount,
+        maxAttempts: failed.maxAttempts,
+        error: truncatedError
       }
     });
 
-    await this.releaseJobLock(failed);
+    await this.releaseJobLock(existing);
   }
 
   async markCanceled(jobId: string): Promise<void> {
@@ -397,7 +528,8 @@ export class JobsService {
       data: {
         status: "CANCELED",
         completedAt: now,
-        cancelRequestedAt: existing.cancelRequestedAt ?? now
+        cancelRequestedAt: existing.cancelRequestedAt ?? now,
+        nextRetryAt: null
       }
     });
 
@@ -410,11 +542,13 @@ export class JobsService {
       message: "Job canceled. In-flight S3 calls may have completed before checkpoint cancellation.",
       metadata: {
         durationSeconds,
-        bestEffort: true
+        bestEffort: true,
+        attemptCount: canceled.attemptCount,
+        maxAttempts: canceled.maxAttempts
       }
     });
 
-    await this.releaseJobLock(canceled);
+    await this.releaseJobLock(existing);
   }
 
   async isCancelRequested(jobId: string): Promise<boolean> {
@@ -449,12 +583,15 @@ export class JobsService {
     correlationId?: string
   ): Promise<JobPublic> {
     const resolvedCorrelationId = correlationId ?? getCorrelationId();
+    const policy = this.getRetryPolicy(type);
 
     const created = await this.prisma.job.create({
       data: {
         type,
         status: "QUEUED",
         correlationId: resolvedCorrelationId,
+        retryable: policy.retryable,
+        maxAttempts: policy.maxAttempts,
         createdByUserId,
         payload: sanitizeJobMetadata(payload) as Prisma.InputJsonValue
       }
@@ -465,7 +602,9 @@ export class JobsService {
       message: "Job queued.",
       metadata: {
         type: created.type,
-        createdByUserId: created.createdByUserId
+        createdByUserId: created.createdByUserId,
+        retryable: created.retryable,
+        maxAttempts: created.maxAttempts
       }
     });
 
@@ -536,6 +675,46 @@ export class JobsService {
     return new Set(scopes.map((scope) => scope.bucket.name));
   }
 
+  private getRetryPolicy(type: JobType): JobRetryPolicy {
+    if (type === "BUCKET_SYNC") {
+      return {
+        retryable: true,
+        maxAttempts: this.configService.get<number>("JOB_RETRY_MAX_ATTEMPTS_BUCKET_SYNC", 5),
+        baseBackoffSeconds: this.configService.get<number>("JOB_RETRY_BACKOFF_SECONDS_BUCKET_SYNC", 15)
+      };
+    }
+
+    if (type === "UPLOAD_CLEANUP") {
+      return {
+        retryable: true,
+        maxAttempts: this.configService.get<number>("JOB_RETRY_MAX_ATTEMPTS_UPLOAD_CLEANUP", 3),
+        baseBackoffSeconds: this.configService.get<number>("JOB_RETRY_BACKOFF_SECONDS_UPLOAD_CLEANUP", 30)
+      };
+    }
+
+    if (type === "RETENTION_CLEANUP") {
+      return {
+        retryable: true,
+        maxAttempts: this.configService.get<number>("JOB_RETRY_MAX_ATTEMPTS_RETENTION_CLEANUP", 3),
+        baseBackoffSeconds: this.configService.get<number>("JOB_RETRY_BACKOFF_SECONDS_RETENTION_CLEANUP", 60)
+      };
+    }
+
+    return {
+      retryable: false,
+      maxAttempts: 1,
+      baseBackoffSeconds: 0
+    };
+  }
+
+  private computeBackoffSeconds(type: JobType, attemptCount: number): number {
+    const policy = this.getRetryPolicy(type);
+    const maxBackoffSeconds = this.configService.get<number>("JOB_RETRY_MAX_BACKOFF_SECONDS", 900);
+    const exponent = Math.max(attemptCount - 1, 0);
+    const raw = policy.baseBackoffSeconds * 2 ** exponent;
+    return Math.min(Math.max(raw, policy.baseBackoffSeconds), maxBackoffSeconds);
+  }
+
   private toPublic(item: Job): JobPublic {
     return {
       id: item.id,
@@ -543,6 +722,11 @@ export class JobsService {
       status: item.status,
       correlationId: item.correlationId ?? null,
       createdByUserId: item.createdByUserId,
+      attemptCount: item.attemptCount,
+      maxAttempts: item.maxAttempts,
+      retryable: item.retryable,
+      nextRetryAt: item.nextRetryAt?.toISOString() ?? null,
+      lastError: item.lastError ?? null,
       createdAt: item.createdAt.toISOString(),
       startedAt: item.startedAt?.toISOString() ?? null,
       completedAt: item.completedAt?.toISOString() ?? null,

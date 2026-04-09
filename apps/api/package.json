@@ -9,6 +9,8 @@
     "build": "tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json --resolve-full-paths --resolve-full-extension .js",
     "start": "node dist/main.js",
     "start:worker": "node dist/worker.js",
+    "maintenance:retention": "tsx src/maintenance/run-retention.ts",
+    "integration:reliability": "tsx src/maintenance/reliability-check.ts",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
     "lint": "eslint --max-warnings=0 \"src/**/*.ts\"",
     "test": "vitest run",

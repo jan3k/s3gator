@@ -31,6 +31,7 @@ enum JobType {
   FOLDER_DELETE
   BUCKET_SYNC
   UPLOAD_CLEANUP
+  RETENTION_CLEANUP
 }
 
 enum JobStatus {
@@ -242,6 +243,11 @@ model Job {
   type              JobType
   status            JobStatus @default(QUEUED)
   correlationId     String?
+  attemptCount      Int       @default(0)
+  maxAttempts       Int       @default(1)
+  retryable         Boolean   @default(false)
+  nextRetryAt       DateTime?
+  lastError         String?
   createdByUserId   String?
   createdByUser     User?     @relation("JobCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
   payload           Json
@@ -258,6 +264,7 @@ model Job {
   events            JobEvent[]
 
   @@index([status, createdAt])
+  @@index([status, nextRetryAt])
   @@index([createdByUserId, createdAt])
   @@index([correlationId, createdAt])
 }

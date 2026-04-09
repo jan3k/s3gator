@@ -33,7 +33,7 @@ export interface PaginationQuery {
   cursor?: string | null;
 }
 
-export type JobType = "FOLDER_RENAME" | "FOLDER_DELETE" | "BUCKET_SYNC" | "UPLOAD_CLEANUP";
+export type JobType = "FOLDER_RENAME" | "FOLDER_DELETE" | "BUCKET_SYNC" | "UPLOAD_CLEANUP" | "RETENTION_CLEANUP";
 export type JobStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELED";
 export type JobEventLevel = "INFO" | "WARN" | "ERROR";
 
@@ -49,6 +49,11 @@ export interface JobPublic {
   status: JobStatus;
   correlationId: string | null;
   createdByUserId: string | null;
+  attemptCount: number;
+  maxAttempts: number;
+  retryable: boolean;
+  nextRetryAt: string | null;
+  lastError: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;

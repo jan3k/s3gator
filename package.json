@@ -20,9 +20,11 @@
     "db:migrate": "npx pnpm --filter @s3gator/api prisma migrate dev",
     "db:seed": "npx pnpm --filter @s3gator/api seed",
     "bootstrap": "bash ./scripts/dev-bootstrap.sh",
+    "maintenance:retention": "npx pnpm --filter @s3gator/api maintenance:retention",
     "integration:up": "bash ./scripts/integration-up.sh",
     "integration:bootstrap": "node ./scripts/integration-bootstrap.mjs",
     "integration:test": "bash ./scripts/integration-test.sh",
+    "integration:reliability": "bash ./scripts/integration-reliability.sh",
     "integration:down": "docker compose -f docker-compose.integration.yml down -v"
   },
   "devDependencies": {
