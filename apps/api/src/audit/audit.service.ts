@@ -20,7 +20,7 @@ export class AuditService {
         action: input.action,
         entityType: input.entityType,
         entityId: input.entityId,
-        metadata: input.metadata as object | undefined,
+        metadata: sanitizeAuditMetadata(input.metadata) as object | undefined,
         ipAddress: input.ipAddress
       }
     });
@@ -37,4 +37,49 @@ export class AuditService {
       }
     });
   }
+}
+
+const REDACT_KEYS = [
+  "password",
+  "secret",
+  "token",
+  "authorization",
+  "credential",
+  "accesskey",
+  "bindpassword"
+] as const;
+
+function sanitizeAuditMetadata(input: unknown): unknown {
+  if (input === undefined) {
+    return undefined;
+  }
+
+  if (input === null) {
+    return null;
+  }
+
+  if (typeof input === "string" || typeof input === "number" || typeof input === "boolean") {
+    return input;
+  }
+
+  if (Array.isArray(input)) {
+    return input.map((item) => sanitizeAuditMetadata(item));
+  }
+
+  if (typeof input === "object") {
+    const result: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(input)) {
+      const lowered = key.toLowerCase();
+      if (REDACT_KEYS.some((segment) => lowered.includes(segment))) {
+        result[key] = "[REDACTED]";
+      } else {
+        result[key] = sanitizeAuditMetadata(value);
+      }
+    }
+
+    return result;
+  }
+
+  return String(input);
 }

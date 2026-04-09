@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, FolderPlus, RefreshCw, Search, Trash2, UploadCloud } from "lucide-react";
 import { EmptyState, PageShell } from "@s3gator/ui";
 import { apiFetch } from "@/lib/api-client";
+import { isAbortUploadError, uploadPartsWithConcurrency } from "@/lib/multipart-upload";
 
 type SessionUser = {
   id: string;
@@ -45,7 +46,8 @@ type UploadJob = {
   id: string;
   name: string;
   progress: number;
-  status: "queued" | "running" | "done" | "error";
+  status: "queued" | "running" | "done" | "aborted" | "error";
+  uploadSessionId?: string;
   error?: string;
 };
 
@@ -64,6 +66,7 @@ export default function FilesPage() {
   const [statsText, setStatsText] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const directoryInputRef = useRef<HTMLInputElement>(null);
+  const uploadControllersRef = useRef(new Map<string, AbortController>());
 
   const meQuery = useQuery({
     queryKey: ["session", "me"],
@@ -157,6 +160,13 @@ export default function FilesPage() {
     }
   }, [bucket, bucketsQuery.data]);
 
+  useEffect(() => {
+    return () => {
+      uploadControllersRef.current.forEach((controller) => controller.abort());
+      uploadControllersRef.current.clear();
+    };
+  }, []);
+
   if (meQuery.data && !meQuery.data.user) {
     router.replace("/login");
     return null;
@@ -186,11 +196,16 @@ export default function FilesPage() {
       const relative = file.webkitRelativePath || file.name;
       const key = normalizeObjectKey(prefix ? `${prefix}${relative}` : relative);
       const jobId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const abortController = new AbortController();
+      let uploadSessionId: string | null = null;
 
       setUploadJobs((prev) => [...prev, { id: jobId, name: relative, progress: 0, status: "queued" }]);
+      uploadControllersRef.current.set(jobId, abortController);
 
       try {
-        setUploadJobs((prev) => prev.map((job) => (job.id === jobId ? { ...job, status: "running" } : job)));
+        setUploadJobs((prev) =>
+          prev.map((job) => (job.id === jobId ? { ...job, status: "running", error: undefined } : job))
+        );
 
         const initialized = await apiFetch<{ uploadSessionId: string; uploadId: string }>("/files/multipart/init", {
           method: "POST",
@@ -200,6 +215,19 @@ export default function FilesPage() {
             contentType: file.type || undefined
           })
         });
+        const sessionId = initialized.uploadSessionId;
+        uploadSessionId = sessionId;
+
+        setUploadJobs((prev) =>
+          prev.map((job) =>
+            job.id === jobId
+              ? {
+                  ...job,
+                  uploadSessionId: sessionId
+                }
+              : job
+          )
+        );
 
         const partCount = Math.max(1, Math.ceil(file.size / PART_SIZE));
         const partNumbers = Array.from({ length: partCount }, (_, index) => index + 1);
@@ -212,43 +240,28 @@ export default function FilesPage() {
           }
         );
 
-        const completed: Array<{ partNumber: number; eTag: string }> = [];
-        let uploaded = 0;
-
-        for (const part of signed.parts) {
-          const start = (part.partNumber - 1) * PART_SIZE;
-          const end = Math.min(start + PART_SIZE, file.size);
-          const chunk = file.slice(start, end);
-
-          const response = await fetch(part.url, {
-            method: "PUT",
-            headers: file.type ? { "content-type": file.type } : undefined,
-            body: chunk
-          });
-
-          if (!response.ok) {
-            throw new Error(`Part upload failed (${response.status})`);
+        const completed = await uploadPartsWithConcurrency({
+          file,
+          parts: signed.parts,
+          partSize: PART_SIZE,
+          contentType: file.type || undefined,
+          concurrency: 4,
+          maxRetries: 3,
+          signal: abortController.signal,
+          onProgress: (loaded, total) => {
+            const denominator = total > 0 ? total : 1;
+            setUploadJobs((prev) =>
+              prev.map((job) =>
+                job.id === jobId
+                  ? {
+                      ...job,
+                      progress: Math.round((loaded / denominator) * 100)
+                    }
+                  : job
+              )
+            );
           }
-
-          const eTag = (response.headers.get("etag") ?? "").replaceAll("\"", "");
-          if (!eTag) {
-            throw new Error("Missing ETag in multipart response");
-          }
-
-          completed.push({ partNumber: part.partNumber, eTag });
-          uploaded += chunk.size;
-
-          setUploadJobs((prev) =>
-            prev.map((job) =>
-              job.id === jobId
-                ? {
-                    ...job,
-                    progress: Math.round((uploaded / file.size) * 100)
-                  }
-                : job
-            )
-          );
-        }
+        });
 
         await apiFetch(`/files/multipart/${initialized.uploadSessionId}/complete`, {
           method: "POST",
@@ -257,17 +270,39 @@ export default function FilesPage() {
 
         setUploadJobs((prev) => prev.map((job) => (job.id === jobId ? { ...job, status: "done", progress: 100 } : job)));
       } catch (error) {
+        const message = error instanceof Error ? error.message : "Upload failed";
+        const isAbort = isAbortUploadError(error) || abortController.signal.aborted;
+
+        if (uploadSessionId) {
+          try {
+            if (isAbort) {
+              await apiFetch(`/files/multipart/${uploadSessionId}/abort`, { method: "POST" });
+            } else {
+              await apiFetch(`/files/multipart/${uploadSessionId}/fail`, {
+                method: "POST",
+                body: JSON.stringify({
+                  error: message
+                })
+              });
+            }
+          } catch {
+            // Session cleanup best effort only; preserve original user-visible error.
+          }
+        }
+
         setUploadJobs((prev) =>
           prev.map((job) =>
             job.id === jobId
               ? {
                   ...job,
-                  status: "error",
-                  error: (error as Error).message
+                  status: isAbort ? "aborted" : "error",
+                  error: isAbort ? "Upload canceled by user" : message
                 }
               : job
           )
         );
+      } finally {
+        uploadControllersRef.current.delete(jobId);
       }
     }
 
@@ -536,7 +571,19 @@ export default function FilesPage() {
               <div key={job.id} className="rounded-lg border border-slate-200 p-3">
                 <div className="flex items-center justify-between text-xs text-slate-600">
                   <span>{job.name}</span>
-                  <span>{job.status}</span>
+                  <div className="flex items-center gap-2">
+                    <span>{job.status}</span>
+                    {job.status === "running" ? (
+                      <button
+                        className="rounded border border-red-300 px-2 py-0.5 text-[11px] text-red-700"
+                        onClick={() => {
+                          uploadControllersRef.current.get(job.id)?.abort();
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="mt-2 h-2 overflow-hidden rounded bg-slate-100">
                   <div className="h-full bg-blue-600 transition-all" style={{ width: `${job.progress}%` }} />

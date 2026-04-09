@@ -23,6 +23,7 @@ export interface GarageConnectionPublic {
   forcePathStyle: boolean;
   adminApiUrl: string | null;
   isDefault: boolean;
+  healthStatus: string | null;
   createdAt: string;
   updatedAt: string;
 }

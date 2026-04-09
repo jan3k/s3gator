@@ -1,8 +1,10 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Ip, Param, Patch, Post, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { roleSchema } from "@s3gator/shared";
 import { RoleGuard } from "@/authorization/role.guard.js";
 import { RequireRoles } from "@/authorization/role.decorator.js";
+import { CurrentUser } from "@/auth/current-user.decorator.js";
+import type { AuthenticatedRequest } from "@/common/request-context.js";
 import { UsersService } from "./users.service.js";
 
 const createUserSchema = z.object({
@@ -30,22 +32,41 @@ export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
   @Get()
-  list() {
-    return this.usersService.list();
+  list(@CurrentUser() actor: AuthenticatedRequest["user"]) {
+    if (!actor) {
+      return [];
+    }
+    return this.usersService.list(actor);
   }
 
   @Post()
   @RequireRoles("SUPER_ADMIN")
-  create(@Body() body: unknown) {
+  create(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Body() body: unknown,
+    @Ip() ipAddress: string
+  ) {
+    if (!actor) {
+      return [];
+    }
+
     const parsed = createUserSchema.parse(body);
     return this.usersService.createLocal({
       ...parsed,
       role: parsed.role ?? "USER"
-    });
+    }, actor, ipAddress);
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: unknown) {
-    return this.usersService.updateUser(id, updateUserSchema.parse(body));
+  update(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Param("id") id: string,
+    @Body() body: unknown,
+    @Ip() ipAddress: string
+  ) {
+    if (!actor) {
+      return [];
+    }
+    return this.usersService.updateUser(actor, id, updateUserSchema.parse(body), ipAddress);
   }
 }

@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start -p 3000",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo 'web lint: skipped'",
+    "lint": "eslint --max-warnings=0 \"app/**/*.{ts,tsx}\" \"components/**/*.{ts,tsx}\" \"lib/**/*.{ts,tsx}\"",
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {

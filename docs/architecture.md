@@ -99,7 +99,12 @@ Implementation detail:
 
 - Super Admin bypasses bucket scope checks.
 - Others require explicit assignment (`user_bucket_permissions`).
+- Bucket visibility is explicit and requires `bucket:list`.
 - API guards + policy service enforce capability checks before any S3/Admin operation.
+- User-management policy is enforced server-side:
+  - only `SUPER_ADMIN` can assign/remove `SUPER_ADMIN`,
+  - `ADMIN` can manage only `USER` accounts,
+  - `ADMIN` cannot modify privileged targets.
 
 ## Backend Service Design
 
@@ -136,7 +141,7 @@ Provided operations:
 Semantics:
 - Virtual folders represented by key prefixes.
 - Empty folder create via zero-byte `<prefix>/` placeholder object.
-- Rename implemented as copy+delete with bounded concurrency and resumable progress checkpoints.
+- Rename implemented as copy+delete with bounded concurrency and in-request progress reporting.
 - Folder delete = recursive list + batch delete.
 - Search = recursive paginated listing under prefix + in-memory/key matching (contains/case-insensitive).
 
@@ -176,7 +181,7 @@ Cross-cutting:
 - cancel/abort upload
 - progress reporting
 - folder drag/drop relative path preservation
-- upload session persistence for recovery
+- upload session state persistence (`INITIATED`/`IN_PROGRESS`/`COMPLETED`/`ABORTED`/`FAILED`)
 
 ## Frontend Architecture (`apps/web`)
 
@@ -240,6 +245,10 @@ Core tables:
 3. Dual auth providers (local + LDAP)
 - Pros: flexible enterprise deployment.
 - Cons: more config validation and operational complexity.
+
+4. No heavy background queue for rename/delete in Stage 2
+- Pros: lower operational complexity and easier local deployment.
+- Cons: long-running rename/delete operations do not provide persisted checkpoint/resume jobs.
 
 ## Non-Goals (by design)
 

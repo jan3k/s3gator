@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
-    "lint": "echo 's3 lint: skipped'",
+    "lint": "eslint --max-warnings=0 \"src/**/*.ts\"",
     "test": "vitest run"
   },
   "dependencies": {

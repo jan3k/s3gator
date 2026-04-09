@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Put, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Ip, Param, Post, Put, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { BUCKET_PERMISSIONS } from "@s3gator/shared";
 import { CurrentUser } from "@/auth/current-user.decorator.js";
@@ -33,20 +33,28 @@ export class BucketsController {
   @Post("admin/buckets/sync")
   @UseGuards(RoleGuard)
   @RequireRoles("SUPER_ADMIN")
-  sync() {
-    return this.bucketsService.syncFromGarage();
+  sync(@CurrentUser() actor: AuthenticatedRequest["user"], @Ip() ipAddress: string) {
+    if (!actor) {
+      return [];
+    }
+    return this.bucketsService.syncFromGarage(actor, ipAddress);
   }
 
   @Put("admin/buckets/:bucketId/grants/:userId")
   @UseGuards(RoleGuard)
   @RequireRoles("SUPER_ADMIN", "ADMIN")
   setUserBucketPermissions(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
     @Param("bucketId") bucketId: string,
     @Param("userId") userId: string,
-    @Body() body: unknown
+    @Body() body: unknown,
+    @Ip() ipAddress: string
   ) {
+    if (!actor) {
+      return [];
+    }
     const parsed = setPermissionsSchema.parse(body);
-    return this.bucketsService.setUserBucketPermissions(userId, bucketId, parsed.permissions);
+    return this.bucketsService.setUserBucketPermissions(actor, userId, bucketId, parsed.permissions, ipAddress);
   }
 
   @Get("admin/buckets/:bucketId/grants")

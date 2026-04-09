@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Ip, Param, Post, Query, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import {
   createFolderSchema,
@@ -40,6 +40,10 @@ const completeSchema = z.object({
     .min(1)
 });
 
+const failSchema = z.object({
+  error: z.string().min(1).max(2000).optional()
+});
+
 @Controller("files")
 @UseGuards(BucketPermissionGuard)
 export class FilesController {
@@ -58,32 +62,32 @@ export class FilesController {
 
   @Post("folder")
   @RequireBucketPermission("folder:create", "bucket", "body")
-  createFolder(@CurrentUser() user: AuthenticatedRequest["user"], @Body() body: unknown, @Query("ip") ip?: string) {
+  createFolder(@CurrentUser() user: AuthenticatedRequest["user"], @Body() body: unknown, @Ip() ipAddress: string) {
     if (!user) {
       return { error: "not authenticated" };
     }
     const parsed = createFolderSchema.parse(body);
-    return this.filesService.createFolder(user, parsed, ip);
+    return this.filesService.createFolder(user, parsed, ipAddress);
   }
 
   @Delete()
   @RequireBucketPermission("object:delete", "bucket", "body")
-  delete(@CurrentUser() user: AuthenticatedRequest["user"], @Body() body: unknown, @Query("ip") ip?: string) {
+  delete(@CurrentUser() user: AuthenticatedRequest["user"], @Body() body: unknown, @Ip() ipAddress: string) {
     if (!user) {
       return { error: "not authenticated" };
     }
     const parsed = deleteSchema.parse(body);
-    return this.filesService.remove(user, parsed, ip);
+    return this.filesService.remove(user, parsed, ipAddress);
   }
 
   @Post("rename")
   @RequireBucketPermission("object:rename", "bucket", "body")
-  rename(@CurrentUser() user: AuthenticatedRequest["user"], @Body() body: unknown, @Query("ip") ip?: string) {
+  rename(@CurrentUser() user: AuthenticatedRequest["user"], @Body() body: unknown, @Ip() ipAddress: string) {
     if (!user) {
       return { error: "not authenticated" };
     }
     const parsed = renameSchema.parse(body);
-    return this.filesService.rename(user, parsed, ip);
+    return this.filesService.rename(user, parsed, ipAddress);
   }
 
   @Get("preview")
@@ -146,26 +150,41 @@ export class FilesController {
     @CurrentUser() user: AuthenticatedRequest["user"],
     @Param("uploadSessionId") uploadSessionId: string,
     @Body() body: unknown,
-    @Query("ip") ip?: string
+    @Ip() ipAddress: string
   ) {
     if (!user) {
       return { error: "not authenticated" };
     }
 
     const parsed = completeSchema.parse(body);
-    return this.filesService.completeMultipart(user, uploadSessionId, parsed.parts, ip);
+    return this.filesService.completeMultipart(user, uploadSessionId, parsed.parts, ipAddress);
   }
 
   @Post("multipart/:uploadSessionId/abort")
   abort(
     @CurrentUser() user: AuthenticatedRequest["user"],
     @Param("uploadSessionId") uploadSessionId: string,
-    @Query("ip") ip?: string
+    @Ip() ipAddress: string
   ) {
     if (!user) {
       return { error: "not authenticated" };
     }
 
-    return this.filesService.abortMultipart(user, uploadSessionId, ip);
+    return this.filesService.abortMultipart(user, uploadSessionId, ipAddress);
+  }
+
+  @Post("multipart/:uploadSessionId/fail")
+  fail(
+    @CurrentUser() user: AuthenticatedRequest["user"],
+    @Param("uploadSessionId") uploadSessionId: string,
+    @Body() body: unknown,
+    @Ip() ipAddress: string
+  ) {
+    if (!user) {
+      return { error: "not authenticated" };
+    }
+
+    const parsed = failSchema.parse(body);
+    return this.filesService.failMultipart(user, uploadSessionId, parsed.error, ipAddress);
   }
 }

@@ -37,6 +37,10 @@ Date: 2026-04-09
   - optional group-to-role mapping.
 - Session persistence in DB with token hashing and expiry.
 - Rate limiting on login attempts (IP/username keyed window).
+- Runtime auth mode enforcement:
+  - `local`: local only,
+  - `ldap`: LDAP only,
+  - `hybrid`: local by default with LDAP fallback (when LDAP is enabled).
 
 ## 2) Session + CSRF
 
@@ -47,27 +51,38 @@ Date: 2026-04-09
 ## 3) Authorization
 
 - Role layer: `SUPER_ADMIN`, `ADMIN`, `USER`.
+- User-management anti-escalation rules:
+  - only `SUPER_ADMIN` can assign/remove `SUPER_ADMIN`,
+  - `ADMIN` can manage only `USER` accounts,
+  - `ADMIN` cannot modify `ADMIN`/`SUPER_ADMIN` targets.
 - Fine-grained per-bucket capabilities:
   - `bucket:list`, `object:list`, `object:read`, `object:preview`, `object:download`,
   - `object:upload`, `object:delete`, `object:rename`,
   - `folder:create`, `folder:rename`, `folder:delete`, `folder:stats`,
   - `search:run`.
 - Enforcement happens in backend guards/services before any Garage operation.
+- Bucket visibility is explicit and requires `bucket:list`.
 
 ## 4) Secrets Handling
 
 - Secrets in DB (Garage key/secret/admin token, LDAP bind password) are encrypted using AES-256-GCM with an app-level key (`APP_ENCRYPTION_KEY`).
-- API responses never include decrypted secret values.
+- API responses never include decrypted secrets or encrypted ciphertext secret columns.
 - Logging middleware redacts password/credential fields.
 
 ## 5) Audit Logging
 
 - Security-relevant actions are written to `audit_logs`, including:
-  - auth events,
-  - admin settings changes,
+  - local/LDAP login success,
+  - login failures,
+  - logout,
+  - user create/update/role change/activation state changes/password resets,
+  - LDAP settings changes,
+  - auth mode changes,
+  - Garage connection create/update/health checks,
+  - Garage bucket sync actions,
   - bucket grant updates,
   - destructive object/folder operations,
-  - multipart upload completion/abort.
+  - multipart upload completion/abort/failure.
 
 ## 6) Garage Compatibility Safety
 

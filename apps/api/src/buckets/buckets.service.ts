@@ -1,16 +1,18 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { SessionUser, BucketPermission } from "@s3gator/shared";
 import { GarageAdminApiV2Client } from "@s3gator/s3";
 import { PrismaService } from "@/prisma/prisma.service.js";
 import { AuthorizationService } from "@/authorization/authorization.service.js";
 import { ConnectionsService } from "@/connections/connections.service.js";
+import { AuditService } from "@/audit/audit.service.js";
 
 @Injectable()
 export class BucketsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly authorizationService: AuthorizationService,
-    private readonly connectionsService: ConnectionsService
+    private readonly connectionsService: ConnectionsService,
+    private readonly auditService: AuditService
   ) {}
 
   async listForUser(user: SessionUser) {
@@ -35,7 +37,7 @@ export class BucketsService {
     });
   }
 
-  async syncFromGarage() {
+  async syncFromGarage(actor: SessionUser, ipAddress?: string) {
     const conn = await this.connectionsService.getDefaultConnectionWithSecrets();
     if (!conn.adminApiUrl || !conn.adminToken) {
       throw new NotFoundException("Default connection does not include Admin API credentials");
@@ -69,15 +71,47 @@ export class BucketsService {
 
     await Promise.all(upserts);
 
+    await this.auditService.record({
+      actor,
+      action: "bucket.sync",
+      entityType: "bucket",
+      metadata: {
+        synced: remoteBuckets.length,
+        connectionId: conn.id
+      },
+      ipAddress
+    });
+
     return {
       synced: remoteBuckets.length
     };
   }
 
-  async setUserBucketPermissions(userId: string, bucketId: string, permissions: BucketPermission[]) {
+  async setUserBucketPermissions(
+    actor: SessionUser,
+    userId: string,
+    bucketId: string,
+    permissions: BucketPermission[],
+    ipAddress?: string
+  ) {
     const bucket = await this.prisma.bucket.findUnique({ where: { id: bucketId } });
     if (!bucket) {
       throw new NotFoundException("Bucket not found");
+    }
+
+    const targetUser = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        role: true
+      }
+    });
+
+    if (!targetUser) {
+      throw new NotFoundException("Target user not found");
+    }
+
+    if (actor.role === "ADMIN" && targetUser.role.code !== "USER") {
+      throw new ForbiddenException("ADMIN can only manage bucket grants for USER accounts");
     }
 
     const permissionRows = await this.prisma.permission.findMany({
@@ -102,6 +136,20 @@ export class BucketsService {
         }))
       });
     }
+
+    await this.auditService.record({
+      actor,
+      action: "bucket.grants.update",
+      entityType: "bucket",
+      entityId: bucket.id,
+      metadata: {
+        bucketName: bucket.name,
+        targetUserId: userId,
+        targetUsername: targetUser.username,
+        permissions
+      },
+      ipAddress
+    });
 
     return this.getBucketGrants(bucketId);
   }

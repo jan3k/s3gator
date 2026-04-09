@@ -1,7 +1,9 @@
-import { Body, Controller, Get, Patch, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Ip, Patch, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { RoleGuard } from "@/authorization/role.guard.js";
 import { RequireRoles } from "@/authorization/role.decorator.js";
+import { CurrentUser } from "@/auth/current-user.decorator.js";
+import type { AuthenticatedRequest } from "@/common/request-context.js";
 import { SettingsService } from "./settings.service.js";
 
 const authModeSchema = z.object({
@@ -20,8 +22,15 @@ export class SettingsController {
   }
 
   @Patch("ldap")
-  updateLdapConfig(@Body() body: unknown) {
-    return this.settingsService.updateLdapConfig(body);
+  updateLdapConfig(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Body() body: unknown,
+    @Ip() ipAddress: string
+  ) {
+    if (!actor) {
+      return [];
+    }
+    return this.settingsService.updateLdapConfig(actor, body, ipAddress);
   }
 
   @Get("auth-mode")
@@ -30,8 +39,15 @@ export class SettingsController {
   }
 
   @Patch("auth-mode")
-  setAuthMode(@Body() body: unknown) {
+  setAuthMode(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Body() body: unknown,
+    @Ip() ipAddress: string
+  ) {
+    if (!actor) {
+      return [];
+    }
     const parsed = authModeSchema.parse(body);
-    return this.settingsService.setAuthMode(parsed.mode);
+    return this.settingsService.setAuthMode(actor, parsed.mode, ipAddress);
   }
 }

@@ -42,19 +42,14 @@ export class AuthorizationService {
       throw new ForbiddenException("Unknown bucket");
     }
 
-    const wherePermission =
-      permission === "bucket:list"
-        ? { userId: user.id, bucketId: bucket.id }
-        : {
-            userId: user.id,
-            bucketId: bucket.id,
-            permission: {
-              code: permission
-            }
-          };
-
     const grant = await this.prisma.userBucketPermission.findFirst({
-      where: wherePermission,
+      where: {
+        userId: user.id,
+        bucketId: bucket.id,
+        permission: {
+          code: permission
+        }
+      },
       select: { id: true }
     });
 
@@ -82,7 +77,10 @@ export class AuthorizationService {
       where: {
         userPermissions: {
           some: {
-            userId: user.id
+            userId: user.id,
+            permission: {
+              code: "bucket:list"
+            }
           }
         }
       },

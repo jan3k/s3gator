@@ -12,10 +12,10 @@ import {
   listFiles,
   presignMultipartPart,
   renameFileOrFolder,
-  searchFilesAndFolders
+  searchFilesAndFolders,
+  type MultipartCompletePart
 } from "@s3gator/s3";
 import type { BucketPermission, SessionUser } from "@s3gator/shared";
-import type { MultipartCompletePart } from "@s3gator/s3";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "@/prisma/prisma.service.js";
 import { ConnectionsService } from "@/connections/connections.service.js";
@@ -186,7 +186,8 @@ export class FilesService {
       where: { id: uploadSessionId },
       data: {
         status: "IN_PROGRESS",
-        partsMeta: partNumbers
+        partsMeta: partNumbers,
+        error: null
       }
     });
 
@@ -222,7 +223,8 @@ export class FilesService {
       where: { id: uploadSessionId },
       data: {
         status: "COMPLETED",
-        partsMeta: parts as unknown as Prisma.InputJsonValue
+        partsMeta: parts as unknown as Prisma.InputJsonValue,
+        error: null
       }
     });
 
@@ -248,12 +250,18 @@ export class FilesService {
     await this.authorizationService.requireBucketPermission(user, bucket.name, "object:upload");
 
     const s3 = await this.getS3Client();
-    await abortMultipartUpload(s3, bucket.name, session.objectKey, session.uploadId);
+    let abortError: string | null = null;
+    try {
+      await abortMultipartUpload(s3, bucket.name, session.objectKey, session.uploadId);
+    } catch (error) {
+      abortError = (error as Error).message;
+    }
 
     await this.prisma.uploadSession.update({
       where: { id: uploadSessionId },
       data: {
-        status: "ABORTED"
+        status: "ABORTED",
+        error: abortError
       }
     });
 
@@ -262,10 +270,57 @@ export class FilesService {
       action: "object.upload.abort",
       entityType: "object",
       entityId: `${bucket.name}/${session.objectKey}`,
+      metadata: {
+        abortError
+      },
       ipAddress
     });
 
-    return { ok: true };
+    return { ok: true, abortError };
+  }
+
+  async failMultipart(user: SessionUser, uploadSessionId: string, errorMessage?: string, ipAddress?: string) {
+    const session = await this.getUploadSessionForUser(user, uploadSessionId);
+    const bucket = await this.prisma.bucket.findUnique({ where: { id: session.bucketId } });
+    if (!bucket) {
+      throw new NotFoundException("Bucket not found");
+    }
+
+    await this.authorizationService.requireBucketPermission(user, bucket.name, "object:upload");
+
+    const s3 = await this.getS3Client();
+    let abortError: string | null = null;
+    try {
+      await abortMultipartUpload(s3, bucket.name, session.objectKey, session.uploadId);
+    } catch (error) {
+      abortError = (error as Error).message;
+    }
+
+    await this.prisma.uploadSession.update({
+      where: { id: uploadSessionId },
+      data: {
+        status: "FAILED",
+        error: errorMessage ?? abortError ?? "Multipart upload failed"
+      }
+    });
+
+    await this.auditService.record({
+      actor: user,
+      action: "object.upload.failed",
+      entityType: "object",
+      entityId: `${bucket.name}/${session.objectKey}`,
+      metadata: {
+        error: errorMessage ?? null,
+        abortError
+      },
+      ipAddress
+    });
+
+    return {
+      ok: false,
+      error: errorMessage ?? "Multipart upload failed",
+      abortError
+    };
   }
 
   async uploadFromServer(

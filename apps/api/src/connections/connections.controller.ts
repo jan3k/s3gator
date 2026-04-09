@@ -1,7 +1,9 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Ip, Param, Patch, Post, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { RoleGuard } from "@/authorization/role.guard.js";
 import { RequireRoles } from "@/authorization/role.decorator.js";
+import { CurrentUser } from "@/auth/current-user.decorator.js";
+import type { AuthenticatedRequest } from "@/common/request-context.js";
 import { ConnectionsService } from "./connections.service.js";
 
 const createSchema = z.object({
@@ -30,17 +32,39 @@ export class ConnectionsController {
   }
 
   @Post()
-  create(@Body() body: unknown) {
-    return this.connectionsService.create(createSchema.parse(body));
+  create(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Body() body: unknown,
+    @Ip() ipAddress: string
+  ) {
+    if (!actor) {
+      return [];
+    }
+    return this.connectionsService.create(actor, createSchema.parse(body), ipAddress);
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: unknown) {
-    return this.connectionsService.update(id, updateSchema.parse(body));
+  update(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Param("id") id: string,
+    @Body() body: unknown,
+    @Ip() ipAddress: string
+  ) {
+    if (!actor) {
+      return [];
+    }
+    return this.connectionsService.update(actor, id, updateSchema.parse(body), ipAddress);
   }
 
   @Post(":id/health")
-  health(@Param("id") id: string) {
-    return this.connectionsService.healthCheck(id);
+  health(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Param("id") id: string,
+    @Ip() ipAddress: string
+  ) {
+    if (!actor) {
+      return [];
+    }
+    return this.connectionsService.healthCheck(actor, id, ipAddress);
   }
 }

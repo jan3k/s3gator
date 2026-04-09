@@ -1,10 +1,12 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { ListBucketsCommand } from "@aws-sdk/client-s3";
+import type { GarageConnection } from "@prisma/client";
 import { createGarageS3Client, GarageAdminApiV2Client } from "@s3gator/s3";
-import type { GarageConnectionPublic } from "@s3gator/shared";
+import type { GarageConnectionPublic, SessionUser } from "@s3gator/shared";
 import { PrismaService } from "@/prisma/prisma.service.js";
 import { CryptoService } from "@/common/crypto.service.js";
+import { AuditService } from "@/audit/audit.service.js";
 
 interface UpsertConnectionInput {
   name: string;
@@ -23,7 +25,8 @@ export class ConnectionsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cryptoService: CryptoService,
-    private readonly configService: ConfigService
+    private readonly configService: ConfigService,
+    private readonly auditService: AuditService
   ) {}
 
   async listPublic(): Promise<GarageConnectionPublic[]> {
@@ -31,20 +34,10 @@ export class ConnectionsService {
       orderBy: [{ isDefault: "desc" }, { name: "asc" }]
     });
 
-    return items.map((item) => ({
-      id: item.id,
-      name: item.name,
-      endpoint: item.endpoint,
-      region: item.region,
-      forcePathStyle: item.forcePathStyle,
-      adminApiUrl: item.adminApiUrl,
-      isDefault: item.isDefault,
-      createdAt: item.createdAt.toISOString(),
-      updatedAt: item.updatedAt.toISOString()
-    }));
+    return items.map((item) => this.toPublic(item));
   }
 
-  async create(input: UpsertConnectionInput) {
+  async create(actor: SessionUser, input: UpsertConnectionInput, ipAddress?: string): Promise<GarageConnectionPublic> {
     if (input.isDefault) {
       await this.prisma.garageConnection.updateMany({
         where: { isDefault: true },
@@ -52,7 +45,7 @@ export class ConnectionsService {
       });
     }
 
-    return this.prisma.garageConnection.create({
+    const created = await this.prisma.garageConnection.create({
       data: {
         name: input.name,
         endpoint: input.endpoint,
@@ -65,9 +58,33 @@ export class ConnectionsService {
         isDefault: input.isDefault ?? false
       }
     });
+
+    await this.auditService.record({
+      actor,
+      action: "connection.create",
+      entityType: "garage_connection",
+      entityId: created.id,
+      metadata: {
+        name: created.name,
+        endpoint: created.endpoint,
+        region: created.region,
+        forcePathStyle: created.forcePathStyle,
+        isDefault: created.isDefault,
+        hasAdminApi: Boolean(created.adminApiUrl),
+        hasAdminToken: Boolean(created.adminTokenEncrypted)
+      },
+      ipAddress
+    });
+
+    return this.toPublic(created);
   }
 
-  async update(id: string, input: Partial<UpsertConnectionInput>) {
+  async update(
+    actor: SessionUser,
+    id: string,
+    input: Partial<UpsertConnectionInput>,
+    ipAddress?: string
+  ): Promise<GarageConnectionPublic> {
     const existing = await this.prisma.garageConnection.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException("Connection not found");
@@ -80,7 +97,7 @@ export class ConnectionsService {
       });
     }
 
-    return this.prisma.garageConnection.update({
+    const updated = await this.prisma.garageConnection.update({
       where: { id },
       data: {
         name: input.name,
@@ -98,6 +115,26 @@ export class ConnectionsService {
         isDefault: input.isDefault
       }
     });
+
+    await this.auditService.record({
+      actor,
+      action: "connection.update",
+      entityType: "garage_connection",
+      entityId: updated.id,
+      metadata: {
+        updatedFields: Object.keys(input),
+        name: updated.name,
+        endpoint: updated.endpoint,
+        region: updated.region,
+        forcePathStyle: updated.forcePathStyle,
+        isDefault: updated.isDefault,
+        hasAdminApi: Boolean(updated.adminApiUrl),
+        hasAdminToken: Boolean(updated.adminTokenEncrypted)
+      },
+      ipAddress
+    });
+
+    return this.toPublic(updated);
   }
 
   async getDefaultConnectionWithSecrets() {
@@ -124,7 +161,7 @@ export class ConnectionsService {
     };
   }
 
-  async healthCheck(id: string) {
+  async healthCheck(actor: SessionUser, id: string, ipAddress?: string) {
     const item = await this.prisma.garageConnection.findUnique({ where: { id } });
     if (!item) {
       throw new NotFoundException("Connection not found");
@@ -167,6 +204,20 @@ export class ConnectionsService {
       data: {
         healthStatus: s3Ok && (adminOk === null || adminOk) ? "healthy" : "degraded"
       }
+    });
+
+    await this.auditService.record({
+      actor,
+      action: "connection.health.check",
+      entityType: "garage_connection",
+      entityId: item.id,
+      metadata: {
+        s3Ok,
+        adminOk,
+        result: s3Ok && (adminOk === null || adminOk) ? "healthy" : "degraded",
+        error
+      },
+      ipAddress
     });
 
     return {
@@ -217,5 +268,20 @@ export class ConnectionsService {
         isDefault: true
       }
     });
+  }
+
+  private toPublic(item: GarageConnection): GarageConnectionPublic {
+    return {
+      id: item.id,
+      name: item.name,
+      endpoint: item.endpoint,
+      region: item.region,
+      forcePathStyle: item.forcePathStyle,
+      adminApiUrl: item.adminApiUrl,
+      isDefault: item.isDefault,
+      healthStatus: item.healthStatus ?? null,
+      createdAt: item.createdAt.toISOString(),
+      updatedAt: item.updatedAt.toISOString()
+    };
   }
 }

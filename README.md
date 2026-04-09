@@ -24,11 +24,16 @@ S3Gator intentionally follows Garage realities:
 ## Key Features
 
 - Local auth (Argon2id) and LDAP auth.
+- Runtime auth mode enforcement: `local`, `ldap`, or `hybrid`.
 - Cookie session auth with CSRF protection.
 - Role model: `SUPER_ADMIN`, `ADMIN`, `USER`.
+- Server-side user-management policy hardening:
+  - only `SUPER_ADMIN` can assign/remove `SUPER_ADMIN`,
+  - `ADMIN` can manage only `USER` accounts.
 - Per-bucket capability grants (e.g. `object:read`, `object:upload`, `folder:delete`, `search:run`).
+- Bucket visibility requires explicit `bucket:list`.
 - Bucket browsing, search, folder operations, rename/delete, stats.
-- Upload center with multipart upload orchestration.
+- Upload center with multipart upload orchestration, retry, and cancel.
 - Presigned URL-based preview/download.
 - Admin panel:
   - users/roles,
@@ -42,8 +47,9 @@ S3Gator intentionally follows Garage realities:
 - Garage credentials/admin token are backend-only.
 - Secrets stored in DB are encrypted (AES-256-GCM) using `APP_ENCRYPTION_KEY`.
 - Login endpoints are rate-limited.
-- Structured logging with sensitive-field redaction.
-- Audit trail for privileged and destructive operations.
+- API response shaping avoids encrypted ciphertext leakage for admin settings/connections.
+- Structured logging and audit metadata redaction for sensitive fields.
+- Audit trail for auth, privileged settings, grant changes, and destructive operations.
 
 See [docs/security.md](docs/security.md) for full details.
 
@@ -115,5 +121,6 @@ Default values are in `.env.example` and should be changed immediately.
 ## Known Limitations
 
 - Distributed rate limiting (e.g. Redis-backed) is not implemented yet.
-- Web E2E coverage is currently a critical smoke baseline, not a full regression suite.
+- Folder rename/delete are bounded-concurrency operations without persisted checkpoint/resume jobs.
+- Web E2E coverage includes authenticated flow baseline but is not a full regression suite.
 - Local dev compose includes PostgreSQL only; Garage is expected from your existing environment or a separate deployment.

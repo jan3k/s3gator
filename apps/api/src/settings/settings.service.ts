@@ -1,8 +1,11 @@
 import { Injectable } from "@nestjs/common";
 import { z } from "zod";
-import { roleSchema } from "@s3gator/shared";
+import { roleSchema, type SessionUser } from "@s3gator/shared";
 import { PrismaService } from "@/prisma/prisma.service.js";
 import { CryptoService } from "@/common/crypto.service.js";
+import { AuditService } from "@/audit/audit.service.js";
+
+type AuthMode = "local" | "ldap" | "hybrid";
 
 const ldapUpdateSchema = z.object({
   enabled: z.boolean(),
@@ -23,7 +26,8 @@ const ldapUpdateSchema = z.object({
 export class SettingsService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly cryptoService: CryptoService
+    private readonly cryptoService: CryptoService,
+    private readonly auditService: AuditService
   ) {}
 
   async getLdapConfig() {
@@ -44,8 +48,9 @@ export class SettingsService {
     };
   }
 
-  async updateLdapConfig(input: unknown) {
+  async updateLdapConfig(actor: SessionUser, input: unknown, ipAddress?: string) {
     const parsed = ldapUpdateSchema.parse(input);
+    const existing = await this.prisma.ldapConfig.findUnique({ where: { id: "default" } });
 
     await this.prisma.ldapConfig.upsert({
       where: { id: "default" },
@@ -85,15 +90,35 @@ export class SettingsService {
       }
     });
 
+    await this.auditService.record({
+      actor,
+      action: "settings.ldap.update",
+      entityType: "settings",
+      entityId: "ldap",
+      metadata: {
+        enabledBefore: existing?.enabled ?? false,
+        enabledAfter: parsed.enabled,
+        urlAfter: parsed.url ?? null,
+        bindDnAfter: parsed.bindDn ?? null,
+        searchBaseAfter: parsed.searchBase ?? null,
+        searchFilterAfter: parsed.searchFilter,
+        tlsRejectUnauthorizedAfter: parsed.tlsRejectUnauthorized,
+        bindPasswordUpdated: parsed.bindPassword !== undefined
+      },
+      ipAddress
+    });
+
     return this.getLdapConfig();
   }
 
   async getAuthMode() {
-    const item = await this.prisma.appSetting.findUnique({ where: { key: "auth_mode" } });
-    return (item?.value as string | undefined) ?? "local";
+    const mode = await this.readAuthMode();
+    return { mode };
   }
 
-  async setAuthMode(mode: "local" | "ldap" | "hybrid") {
+  async setAuthMode(actor: SessionUser, mode: AuthMode, ipAddress?: string) {
+    const previousMode = await this.readAuthMode();
+
     await this.prisma.appSetting.upsert({
       where: { key: "auth_mode" },
       create: {
@@ -105,6 +130,26 @@ export class SettingsService {
       }
     });
 
+    await this.auditService.record({
+      actor,
+      action: "settings.auth_mode.update",
+      entityType: "settings",
+      entityId: "auth_mode",
+      metadata: {
+        previousMode,
+        nextMode: mode
+      },
+      ipAddress
+    });
+
     return { mode };
+  }
+
+  async readAuthMode(): Promise<AuthMode> {
+    const item = await this.prisma.appSetting.findUnique({ where: { key: "auth_mode" } });
+    if (item?.value === "local" || item?.value === "ldap" || item?.value === "hybrid") {
+      return item.value;
+    }
+    return "local";
   }
 }

@@ -13,6 +13,7 @@ import type { Response } from "express";
 import { loginSchema } from "@s3gator/shared";
 import type { AuthenticatedRequest } from "@/common/request-context.js";
 import { Public } from "@/common/public.decorator.js";
+import { AuditService } from "@/audit/audit.service.js";
 import { AuthService } from "./auth.service.js";
 import { LoginRateLimiterService } from "./login-rate-limiter.service.js";
 import { SessionService } from "./session.service.js";
@@ -24,7 +25,8 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly sessionService: SessionService,
     private readonly limiter: LoginRateLimiterService,
-    private readonly configService: ConfigService
+    private readonly configService: ConfigService,
+    private readonly auditService: AuditService
   ) {}
 
   @Public()
@@ -41,8 +43,8 @@ export class AuthController {
     this.limiter.check(key);
 
     try {
-      const user = await this.authService.login(parsed);
-      const session = await this.sessionService.createSession(user.id, ip, req.headers["user-agent"]);
+      const authenticated = await this.authService.login(parsed);
+      const session = await this.sessionService.createSession(authenticated.user.id, ip, req.headers["user-agent"]);
 
       this.limiter.clear(key);
 
@@ -57,12 +59,38 @@ export class AuthController {
         maxAge: this.configService.get<number>("SESSION_TTL_HOURS", 24) * 60 * 60 * 1000
       });
 
+      await this.auditService.record({
+        actor: authenticated.user,
+        action: `auth.login.success.${authenticated.method}`,
+        entityType: "user",
+        entityId: authenticated.user.id,
+        metadata: {
+          username: authenticated.user.username,
+          authMode: authenticated.authMode,
+          requestedMode: parsed.mode ?? null
+        },
+        ipAddress: ip
+      });
+
       return {
-        user,
+        user: authenticated.user,
         csrfToken: session.csrfToken
       };
     } catch (error) {
       this.limiter.registerFailure(key);
+
+      await this.auditService.record({
+        action: "auth.login.failure",
+        entityType: "auth",
+        entityId: parsed.username,
+        metadata: {
+          username: parsed.username,
+          requestedMode: parsed.mode ?? null,
+          reason: error instanceof Error ? error.message : "Unknown error"
+        },
+        ipAddress: ip
+      });
+
       throw error;
     }
   }
@@ -78,6 +106,13 @@ export class AuthController {
     const cookieName = this.configService.get<string>("SESSION_COOKIE_NAME", "s3gator_sid");
     res.clearCookie(cookieName, { path: "/" });
 
+    await this.auditService.record({
+      actor: req.user,
+      action: "auth.logout",
+      entityType: "session",
+      entityId: req.sessionId
+    });
+
     return { ok: true };
   }
 
@@ -89,5 +124,11 @@ export class AuthController {
   @Get("csrf")
   csrf(@Req() req: AuthenticatedRequest) {
     return { csrfToken: req.csrfToken ?? null };
+  }
+
+  @Public()
+  @Get("mode")
+  async mode() {
+    return this.authService.getAuthModeInfo();
   }
 }

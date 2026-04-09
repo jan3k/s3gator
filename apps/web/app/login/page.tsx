@@ -15,6 +15,11 @@ const formSchema = z.object({
 });
 
 type FormValues = z.infer<typeof formSchema>;
+type AuthModeInfo = {
+  mode: "local" | "ldap" | "hybrid";
+  ldapEnabled: boolean;
+  allowedMethods: Array<"local" | "ldap">;
+};
 
 export default function LoginPage() {
   const router = useRouter();
@@ -22,6 +27,10 @@ export default function LoginPage() {
   const meQuery = useQuery({
     queryKey: ["session", "me"],
     queryFn: () => apiFetch<{ user: { id: string } | null }>("/auth/me")
+  });
+  const modeQuery = useQuery({
+    queryKey: ["auth", "mode"],
+    queryFn: () => apiFetch<AuthModeInfo>("/auth/mode")
   });
 
   const form = useForm<FormValues>({
@@ -45,7 +54,15 @@ export default function LoginPage() {
   });
 
   const onSubmit = (values: FormValues) => {
-    loginMutation.mutate(values);
+    const configuredMode = modeQuery.data?.mode ?? "hybrid";
+    const allowedMethods = modeQuery.data?.allowedMethods ?? ["local", "ldap"];
+    const fallbackMode = allowedMethods[0] ?? "local";
+    const selectedMode = allowedMethods.includes(values.mode) ? values.mode : fallbackMode;
+    const effectiveMode = configuredMode === "hybrid" ? selectedMode : configuredMode;
+    loginMutation.mutate({
+      ...values,
+      mode: effectiveMode
+    });
   };
 
   useEffect(() => {
@@ -53,6 +70,22 @@ export default function LoginPage() {
       router.replace("/files");
     }
   }, [meQuery.data?.user, router]);
+
+  useEffect(() => {
+    if (!modeQuery.data) {
+      return;
+    }
+
+    if (modeQuery.data.mode === "local" || modeQuery.data.mode === "ldap") {
+      form.setValue("mode", modeQuery.data.mode);
+      return;
+    }
+
+    const currentMode = form.getValues("mode");
+    if (!modeQuery.data.allowedMethods.includes(currentMode)) {
+      form.setValue("mode", modeQuery.data.allowedMethods[0] ?? "local");
+    }
+  }, [form, modeQuery.data]);
 
   return (
     <div className="mx-auto mt-20 w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
@@ -85,11 +118,23 @@ export default function LoginPage() {
           <select
             className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-0 focus:border-blue-500"
             {...form.register("mode")}
+            disabled={modeQuery.data?.mode !== "hybrid" || (modeQuery.data?.allowedMethods.length ?? 0) === 1}
           >
             <option value="local">Local</option>
-            <option value="ldap">LDAP</option>
+            <option
+              value="ldap"
+              disabled={!modeQuery.data?.allowedMethods.includes("ldap")}
+            >
+              LDAP
+            </option>
           </select>
         </label>
+
+        {modeQuery.data?.mode && modeQuery.data.mode !== "hybrid" ? (
+          <p className="text-xs text-slate-500">
+            Authentication mode is enforced by server policy: <strong>{modeQuery.data.mode}</strong>.
+          </p>
+        ) : null}
 
         {form.formState.errors.root?.message ? (
           <p className="text-sm text-red-700">{form.formState.errors.root.message}</p>
