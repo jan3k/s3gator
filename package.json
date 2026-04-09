@@ -1,0 +1,30 @@
+{
+  "name": "s3gator-storage-manager",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "npx pnpm --parallel --filter @s3gator/api --filter @s3gator/web dev",
+    "build": "npx pnpm -r build",
+    "typecheck": "npx pnpm --filter @s3gator/shared build && npx pnpm --filter @s3gator/s3 build && npx pnpm --filter @s3gator/ui build && npx pnpm -r typecheck",
+    "lint": "npx pnpm -r lint",
+    "test": "npx pnpm -r test",
+    "test:e2e": "playwright test",
+    "format": "prettier --write .",
+    "db:generate": "npx pnpm --filter @s3gator/api prisma generate",
+    "db:migrate": "npx pnpm --filter @s3gator/api prisma migrate dev",
+    "db:seed": "npx pnpm --filter @s3gator/api seed",
+    "bootstrap": "bash ./scripts/dev-bootstrap.sh"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.59.1",
+    "@types/node": "24.7.2",
+    "eslint": "10.2.0",
+    "prettier": "3.8.1",
+    "typescript": "6.0.2",
+    "vitest": "4.1.4"
+  }
+}

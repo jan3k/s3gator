@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16.9-alpine
+    container_name: s3gator-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: s3gator
+      POSTGRES_USER: s3gator
+      POSTGRES_PASSWORD: s3gator
+    ports:
+      - "5432:5432"
+    volumes:
+      - s3gator-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U s3gator -d s3gator"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  s3gator-postgres-data:

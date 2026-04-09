@@ -1,0 +1,194 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AppRole {
+  SUPER_ADMIN
+  ADMIN
+  USER
+}
+
+enum AuthSource {
+  LOCAL
+  LDAP
+}
+
+enum UploadSessionStatus {
+  INITIATED
+  IN_PROGRESS
+  COMPLETED
+  ABORTED
+  FAILED
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  code        AppRole          @unique
+  name        String
+  users       User[]
+  permissions RolePermission[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+}
+
+model Permission {
+  id          String                 @id @default(cuid())
+  code        String                 @unique
+  description String
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  roleLinks   RolePermission[]
+  userLinks   UserBucketPermission[]
+}
+
+model RolePermission {
+  id           String     @id @default(cuid())
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+}
+
+model User {
+  id            String                 @id @default(cuid())
+  username      String                 @unique
+  email         String?                @unique
+  displayName   String?
+  roleId        String
+  role          Role                   @relation(fields: [roleId], references: [id])
+  source        AuthSource             @default(LOCAL)
+  isActive      Boolean                @default(true)
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+  localCreds    LocalCredential?
+  sessions      Session[]
+  bucketGrants  UserBucketPermission[]
+  auditLogs     AuditLog[]
+  uploadSession UploadSession[]
+}
+
+model LocalCredential {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model LdapConfig {
+  id                    String   @id @default("default")
+  enabled               Boolean  @default(false)
+  url                   String?
+  bindDn                String?
+  bindPasswordEncrypted String?
+  searchBase            String?
+  searchFilter          String   @default("(uid={{username}})")
+  usernameAttribute     String   @default("uid")
+  emailAttribute        String   @default("mail")
+  displayNameAttribute  String   @default("cn")
+  groupAttribute        String   @default("memberOf")
+  groupRoleMapping      Json     @default("{}")
+  tlsRejectUnauthorized Boolean  @default(true)
+  updatedAt             DateTime @updatedAt
+  createdAt             DateTime @default(now())
+}
+
+model Session {
+  id           String    @id @default(cuid())
+  tokenHash    String    @unique
+  csrfToken    String
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ipAddress    String?
+  userAgent    String?
+  lastSeenAt   DateTime  @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime  @default(now())
+}
+
+model GarageConnection {
+  id                   String    @id @default(cuid())
+  name                 String    @unique
+  endpoint             String
+  region               String
+  forcePathStyle       Boolean   @default(true)
+  accessKeyEncrypted   String
+  secretKeyEncrypted   String
+  adminApiUrl          String?
+  adminTokenEncrypted  String?
+  isDefault            Boolean   @default(false)
+  healthStatus         String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  buckets              Bucket[]
+}
+
+model Bucket {
+  id               String                 @id @default(cuid())
+  name             String                 @unique
+  garageBucketId   String?
+  connectionId     String?
+  connection       GarageConnection?      @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  userPermissions  UserBucketPermission[]
+  uploadSessions   UploadSession[]
+}
+
+model UserBucketPermission {
+  id           String     @id @default(cuid())
+  userId       String
+  bucketId     String
+  permissionId String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bucket       Bucket     @relation(fields: [bucketId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+
+  @@unique([userId, bucketId, permissionId])
+}
+
+model AppSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorUserId String?
+  actorUser   User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+}
+
+model UploadSession {
+  id          String              @id @default(cuid())
+  userId      String
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bucketId    String
+  bucket      Bucket              @relation(fields: [bucketId], references: [id], onDelete: Cascade)
+  objectKey   String
+  uploadId    String
+  status      UploadSessionStatus @default(INITIATED)
+  partsMeta   Json                @default("[]")
+  error       String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  expiresAt   DateTime
+}
