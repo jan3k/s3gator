@@ -1,13 +1,13 @@
-# Architecture: Stage 6 (Archival, Scheduler, Multi-Worker Reliability)
+# Architecture: Stage 7 (Archive Governance, Safe Archive Access, Deterministic Reliability CI)
 
 Date: 2026-04-10
 
 ## Monorepo
 
-- `apps/api`: NestJS API + Prisma/PostgreSQL
-- `apps/web`: Next.js frontend
-- `packages/shared`: shared role/permission/types/schema contracts
-- `packages/s3`: Garage-compatible S3 + Admin API v2 service layer
+- `apps/api`: NestJS API + Prisma/PostgreSQL + worker logic
+- `apps/web`: Next.js admin/file-manager UI
+- `packages/shared`: role/permission/types/schema contracts
+- `packages/s3`: Garage-compatible S3 + Admin API v2 client layer
 - `packages/ui`: shared UI primitives
 
 ## Runtime Topology
@@ -15,7 +15,7 @@ Date: 2026-04-10
 Recommended production topology:
 
 1. API instances (stateless)
-2. Worker instances (job execution)
+2. Worker instances (job execution + optional scheduler)
 3. PostgreSQL (system of record)
 4. Redis (distributed limiter + locks)
 5. Garage S3 + Garage Admin API v2
@@ -23,202 +23,142 @@ Recommended production topology:
 
 ## Security and Auth Model
 
-- Local + LDAP auth with runtime auth mode (`local` / `ldap` / `hybrid`).
-- Session cookie auth with CSRF on mutating routes.
+- Local + LDAP auth with runtime mode (`local` / `ldap` / `hybrid`).
+- Cookie sessions + CSRF for state-changing routes.
 - Authorization is app-native RBAC + per-bucket grants.
-- Bucket visibility requires explicit `bucket:list` permission.
+- Bucket visibility requires explicit `bucket:list`.
 - Scoped admin v2:
   - `SUPER_ADMIN`: global
-  - `ADMIN`: constrained by optional admin-bucket scopes for operational/grant actions
-  - `USER`: explicit per-bucket grants only
+  - `ADMIN`: optional bucket scope constraints
+  - `USER`: explicit per-bucket grants
 
-## Jobs, Retry, and Timeline Model
+## Jobs, Retry, and Timeline
 
-## Persistent job state
+`jobs` persists lifecycle, retry metadata, correlation id, and progress/result/failure state.
 
-`jobs` table persists:
+- retryable: `BUCKET_SYNC`, `UPLOAD_CLEANUP`, `RETENTION_CLEANUP`
+- non-retryable destructive: `FOLDER_RENAME`, `FOLDER_DELETE`
 
-- `type`: `FOLDER_RENAME`, `FOLDER_DELETE`, `BUCKET_SYNC`, `UPLOAD_CLEANUP`, `RETENTION_CLEANUP`
-- `status`: `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELED`
-- actor and timing metadata
-- progress/result/failure summaries
-- cancellation metadata
-- `correlationId` for cross-runtime tracing
-- retry metadata:
-  - `attemptCount`
-  - `maxAttempts`
-  - `retryable`
-  - `nextRetryAt`
-  - `lastError`
+`job_events` persists operator-meaningful timeline entries including:
 
-Retry policy by job type:
+- lifecycle (`created`, `claimed`, `started`, `progress_update`, `failed`, `completed`, `canceled*`)
+- retry/reclaim (`retry_scheduled`, `retry_started`, `retry_exhausted`, `retry_skipped_non_retryable`, `reclaimed`)
+- domain steps (`bucket_sync.*`, `folder_rename.*`, `upload_cleanup.*`, `retention_cleanup.*`)
 
-- retryable:
-  - `BUCKET_SYNC`
-  - `UPLOAD_CLEANUP`
-  - `RETENTION_CLEANUP`
-- non-retryable:
-  - `FOLDER_RENAME`
-  - `FOLDER_DELETE`
+## Retention, Archive Tier, and Archive Governance
 
-## Event timeline
+Hot-table retention still supports:
 
-`job_events` table stores structured lifecycle and domain-step history:
+- `hard_delete`
+- `archive_and_prune` (`RETENTION_ARCHIVE_ENABLED=true`)
 
-- core events: `created`, `claimed`, `started`, `progress`, `canceled_requested`, `canceled`, `failed`, `completed`
-- retry/reclaim events: `retry_scheduled`, `retry_started`, `retry_exhausted`, `retry_skipped_non_retryable`, `reclaimed`
-- domain events: e.g. `folder_rename.started`, `bucket_sync.progress`, `upload_cleanup.item_processed`
-- event fields: `jobId`, `createdAt`, `level`, `type`, `message`, `metadata`, optional `correlationId`
+Archive tier tables:
 
-This is intentionally eventful but bounded; events are meaningful operator diagnostics, not a raw per-object firehose.
+- `AuditLogArchive`
+- `JobEventArchive`
 
-## Worker Execution and Cancellation
+Stage 7 adds second-level archive governance windows:
 
-- Worker claims queued jobs with DB transition + Redis lock.
-- Jobs are restart-safe at job-level (reclaimable if stale lock).
-- Reclaimed stale runs are explicitly marked in timeline (`reclaimed`) and metrics.
-- Cancellation is best-effort:
-  - cancel request is persisted,
-  - worker checks cancellation between steps/batches,
-  - in-flight S3 operations may complete before stop.
-- Timeline events explicitly capture cancellation request/observation behavior.
-- Retry scheduling is explicit:
-  - retryable failures move back to `QUEUED` with `nextRetryAt`,
-  - destructive job failures are terminal without retry.
+- `ARCHIVE_RETENTION_AUDIT_LOG_DAYS`
+- `ARCHIVE_RETENTION_SECURITY_AUDIT_DAYS`
+- `ARCHIVE_RETENTION_JOB_EVENT_DAYS`
 
-## Operational Retention and Archive Tier
+This keeps archive tables bounded while retaining security-relevant audit history longer than routine records.
 
-Stage 6 retention maintenance covers:
+## Safe Archive Access
 
-- `job_events` (different windows for completed/canceled vs failed jobs)
-- `audit_logs` (general vs security-relevant windows)
-- old terminal jobs
-- old terminal upload sessions
+Stage 7 adds read-only archive APIs (SUPER_ADMIN-only):
 
-Retention execution modes:
+- `GET /admin/audit/archive`
+- `GET /jobs/archive/events`
 
-1. `hard_delete` (default): Stage 5 behavior
-2. `archive_and_prune` (optional):
-   - old `audit_logs` rows are copied to `AuditLogArchive` before pruning hot table rows
-   - old `job_events` rows are copied to `JobEventArchive` before pruning hot table rows
+Both support deterministic sorting (`createdAt desc, id desc`), explicit pagination (`limit`, `offset`), and filters:
 
-Hot-path operational queries continue to read primary tables; archive tables are for diagnostics and longer-lived operational history.
+- date range (`from`, `to`)
+- action/type
+- correlation id
+- job id (job events)
+- severity/level (job events)
+- safe text search over bounded fields
 
-Retention is executable via:
+Admin UI includes archive browser panels for archived audit logs and archived job events.
 
-- queued maintenance job (`RETENTION_CLEANUP`),
-- direct maintenance command (`pnpm maintenance:retention`).
+## Scheduler Model (Hardened)
 
-## Scheduled Maintenance
+Stage 7 scheduler remains in-process and lock-coordinated (no external orchestrator), but now includes stronger governance:
 
-Stage 6 introduces a lightweight in-process scheduler with distributed coordination:
+- per-task enable flags:
+  - `MAINTENANCE_TASK_RETENTION_ENABLED`
+  - `MAINTENANCE_TASK_UPLOAD_CLEANUP_ENABLED`
+  - `MAINTENANCE_TASK_BUCKET_SYNC_ENABLED`
+- lock TTL safety guard (enforces minimum relative to tick)
+- richer task status:
+  - `lastResult`, `lastTrigger`
+  - `lastSuccessAt`, `lastFailureAt`
+  - `lastRunAt`, `nextRunAt`, `lastJobId`, `lastError`
+  - task heartbeat and scheduler heartbeat visibility
+- safe operator trigger path:
+  - `POST /jobs/maintenance/tasks/:task/run-once` (SUPER_ADMIN)
+  - duplicate-safe via scheduler lock + active-job guard
 
-- scheduler tick loop is env-gated (`MAINTENANCE_SCHEDULER_ENABLED`)
-- single-leader behavior is enforced with Redis lock (`maintenance:scheduler:tick`)
-- scheduled tasks enqueue through the same jobs pipeline (not a separate orchestrator)
+All scheduled/manual maintenance paths continue to enqueue into the same jobs pipeline with explicit `reason` metadata.
 
-Scheduled task set:
+## Multipart Durability
 
-- `RETENTION_CLEANUP`
-- `UPLOAD_CLEANUP`
-- `BUCKET_SYNC` (optional, interval can be `0` to disable)
+Multipart upload sessions keep persisted resume state (session id, upload id, completed parts, part sizing, expiry/activity metadata, relative path).
 
-Scheduler writes per-task run state (`maintenance.scheduler.task.*`) and exposes it through maintenance status API/UI:
+Behavior remains:
 
-- last run,
-- next run,
-- result (`queued`, `skipped_active`, `failed`),
-- linked job ID (if queued),
-- last error.
-
-## Multipart Upload Durability
-
-`upload_sessions` persists multipart state including:
-
-- upload id/session id
-- part sizing and totals
-- completed parts
-- relative path for folder uploads
-- expiry and last activity metadata
-
-Resume flow:
-
-1. client attempts recover by file key/size/content-type
-2. server returns existing active session + completed parts (if available)
-3. client uploads missing parts only
-4. client marks part completion
-5. client completes upload
+- retry and resume for unfinished uploads
+- best-effort cancellation/abort semantics
+- stale session cleanup via maintenance jobs
 
 ## Redis Usage
 
-1. Distributed login throttling
-2. Job locking (`SET NX EX`) and coordination
-
-Redis can be disabled in local-only paths, but production should keep it enabled for multi-instance correctness.
+- distributed login throttling
+- job locks and reclaim coordination
+- scheduler leader lock coordination
 
 ## Observability
 
-## Metrics
+### Metrics and health
 
-- `GET /metrics` (Prometheus)
-- includes login, upload, job, S3 failure, LDAP failure metrics
-- Stage 6 metrics include retry/reclaim/retention/scheduler families:
-  - `s3gator_job_retries_total`
-  - `s3gator_job_reclaims_total`
-  - `s3gator_retention_cleanup_total`
-  - `s3gator_retention_deleted_records_total`
-  - `s3gator_retention_archived_records_total`
-  - `s3gator_scheduler_runs_total`
-
-## Health
-
+- `GET /metrics`
 - `GET /health/live`
 - `GET /health/ready`
 
-## Correlation and traces
+Metrics include auth, upload, jobs, retries, reclaims, S3 failures, LDAP failures, retention/archive, archive-governance deletes, and scheduler outcomes.
 
-- API assigns correlation/request ID (`x-request-id` by default).
-- Correlation ID flows into:
-  - request context,
-  - structured logs,
-  - audit metadata context,
-  - jobs + job events,
-  - worker execution context,
-  - Garage Admin/S3 operation context where instrumented.
-- OpenTelemetry SDK is integrated (OTLP exporter configurable by env).
+### Correlation and tracing
 
-## Integration Lane Architecture
+- request correlation id (`x-request-id` by default)
+- propagation into logs, audit metadata context, jobs and timeline events
+- OpenTelemetry export via OTLP env configuration
 
-`docker-compose.integration.yml` runs:
+### Provisioning assets
 
-- Postgres
-- Redis
-- Garage v2.2.0
-- API
-- Worker
-- Web
+Stage 7 includes provisioning-oriented assets:
 
-Bootstrap script (`scripts/integration-bootstrap.mjs`) makes integration deterministic by initializing Garage layout/key/bucket/alias, verifying app connectivity, and running bucket sync.
+- `ops/grafana/dashboards/*.json`
+- `ops/grafana/provisioning/*`
+- `ops/prometheus/*.yml`
+- `ops/alertmanager/*.yml`
+
+## Integration and Reliability Lanes
+
+`docker-compose.integration.yml` runs PostgreSQL + Redis + Garage + API + Worker + Web.
+
+Bootstrap script (`scripts/integration-bootstrap.mjs`) remains deterministic for dev/integration/CI.
 
 Reliability lanes:
 
-- `integration:reliability` (Stage 5 baseline):
-  1. queue long-running rename job,
-  2. interrupt worker container,
-  3. wait lock expiry,
-  4. restart worker,
-  5. verify reclaim + single terminal completion.
-
-- `integration:reliability:v2` (Stage 6):
-  1. run baseline reclaim scenario,
-  2. run retryable `BUCKET_SYNC` failure/retry scenario,
-  3. inject worker restart during retry lifecycle,
-  4. force multi-worker contention (secondary worker),
-  5. assert coherent timeline and no duplicate terminal event.
+- `integration:reliability`: restart/reclaim baseline
+- `integration:reliability:v2`: retry + restart + contention lifecycle
+- `integration:reliability:ci`: deterministic CI-oriented run combining v2 plus Stage 7 duplicate-prevention + non-retryable-destructive validations
 
 ## Honest Boundaries
 
-- No ACL/policy/versioning abstraction is introduced (Garage constraints respected).
-- Rename/delete durability is job-level, not per-object checkpoint resume.
-- Job cancellation remains best-effort for in-flight long operations.
-- Archive mode is optional; default deployments can remain hard-delete only.
+- No ACL/policy/versioning abstraction beyond Garage-supported model.
+- Rename/delete durability is job-level; no per-object checkpoint resume.
+- Job cancel remains best-effort for in-flight operations.
+- Archive tier is in the same DB (operational archive, not cold storage/data warehouse).

@@ -217,6 +217,7 @@ model AuditLogArchive {
   id               String   @id @default(cuid())
   sourceAuditLogId String?  @unique
   actorUserId      String?
+  correlationId    String?
   action           String
   entityType       String
   entityId         String?
@@ -228,6 +229,7 @@ model AuditLogArchive {
   @@index([createdAt])
   @@index([archivedAt])
   @@index([action, createdAt])
+  @@index([correlationId, createdAt])
 }
 
 model UploadSession {

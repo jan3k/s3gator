@@ -124,28 +124,83 @@ type MaintenanceStatus = {
     error: string | null;
     archived: Record<string, number>;
     deleted: Record<string, number>;
+    archivePurged: Record<string, number>;
   } | null;
   archive: {
     enabled: boolean;
     auditLogArchiveCount: number;
     jobEventArchiveCount: number;
     lastArchivedAt: string | null;
+    policy: {
+      archiveAuditLogDays: number;
+      archiveSecurityAuditDays: number;
+      archiveJobEventDays: number;
+    };
   };
   scheduler: {
     enabled: boolean;
     tickSeconds: number;
     lockTtlSeconds: number;
+    lastHeartbeatAt: string | null;
     tasks: Array<{
       task: "retention_cleanup" | "upload_cleanup" | "bucket_sync";
       enabled: boolean;
       intervalMinutes: number;
       lastRunAt: string | null;
       nextRunAt: string | null;
-      lastResult: "queued" | "skipped_active" | "failed" | null;
+      lastResult: "queued" | "skipped_active" | "failed" | "skipped_disabled" | null;
+      lastTrigger: "scheduled" | "manual" | null;
+      lastSuccessAt: string | null;
+      lastFailureAt: string | null;
+      lastHeartbeatAt: string | null;
       lastJobId: string | null;
       lastError: string | null;
     }>;
   };
+};
+
+type SchedulerTaskKey = "retention_cleanup" | "upload_cleanup" | "bucket_sync";
+
+type ArchiveAuditLog = {
+  id: string;
+  sourceAuditLogId: string | null;
+  actorUserId: string | null;
+  correlationId: string | null;
+  action: string;
+  entityType: string;
+  entityId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  archivedAt: string;
+};
+
+type ArchiveAuditResponse = {
+  items: ArchiveAuditLog[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+type ArchiveJobEvent = {
+  id: string;
+  sourceJobEventId: string | null;
+  jobId: string;
+  jobType: string | null;
+  jobStatus: string | null;
+  correlationId: string | null;
+  type: string;
+  level: "INFO" | "WARN" | "ERROR";
+  message: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  archivedAt: string;
+};
+
+type ArchiveJobEventsResponse = {
+  items: ArchiveJobEvent[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
 export default function AdminPage() {
@@ -158,6 +213,20 @@ export default function AdminPage() {
   const [selectedScopeBucketIds, setSelectedScopeBucketIds] = useState<string[]>([]);
   const [selectedJobId, setSelectedJobId] = useState("");
   const [statusMessage, setStatusMessage] = useState<string>("");
+  const [archiveAuditSearch, setArchiveAuditSearch] = useState("");
+  const [archiveAuditAction, setArchiveAuditAction] = useState("");
+  const [archiveAuditCorrelationId, setArchiveAuditCorrelationId] = useState("");
+  const [archiveAuditFrom, setArchiveAuditFrom] = useState("");
+  const [archiveAuditTo, setArchiveAuditTo] = useState("");
+  const [archiveAuditOffset, setArchiveAuditOffset] = useState(0);
+  const [archiveJobSearch, setArchiveJobSearch] = useState("");
+  const [archiveJobType, setArchiveJobType] = useState("");
+  const [archiveJobCorrelationId, setArchiveJobCorrelationId] = useState("");
+  const [archiveJobLevel, setArchiveJobLevel] = useState<"" | "INFO" | "WARN" | "ERROR">("");
+  const [archiveJobIdFilter, setArchiveJobIdFilter] = useState("");
+  const [archiveJobFrom, setArchiveJobFrom] = useState("");
+  const [archiveJobTo, setArchiveJobTo] = useState("");
+  const [archiveJobOffset, setArchiveJobOffset] = useState(0);
 
   const meQuery = useQuery({
     queryKey: ["session", "me"],
@@ -266,6 +335,64 @@ export default function AdminPage() {
   const auditQuery = useQuery({
     queryKey: ["admin", "audit"],
     queryFn: () => apiFetch<Array<{ id: string; action: string; entityType: string; entityId: string | null; createdAt: string }>>("/admin/audit"),
+    enabled: meQuery.data?.user?.role === "SUPER_ADMIN"
+  });
+
+  const archiveAuditQuery = useQuery({
+    queryKey: [
+      "admin",
+      "audit",
+      "archive",
+      archiveAuditOffset,
+      archiveAuditSearch,
+      archiveAuditAction,
+      archiveAuditCorrelationId,
+      archiveAuditFrom,
+      archiveAuditTo
+    ],
+    queryFn: () =>
+      apiFetch<ArchiveAuditResponse>(
+        `/admin/audit/archive?${new URLSearchParams({
+          limit: "25",
+          offset: String(archiveAuditOffset),
+          ...(archiveAuditSearch ? { search: archiveAuditSearch } : {}),
+          ...(archiveAuditAction ? { action: archiveAuditAction } : {}),
+          ...(archiveAuditCorrelationId ? { correlationId: archiveAuditCorrelationId } : {}),
+          ...(archiveAuditFrom ? { from: new Date(archiveAuditFrom).toISOString() } : {}),
+          ...(archiveAuditTo ? { to: new Date(archiveAuditTo).toISOString() } : {})
+        }).toString()}`
+      ),
+    enabled: meQuery.data?.user?.role === "SUPER_ADMIN"
+  });
+
+  const archiveJobEventsQuery = useQuery({
+    queryKey: [
+      "jobs",
+      "archive",
+      "events",
+      archiveJobOffset,
+      archiveJobSearch,
+      archiveJobType,
+      archiveJobCorrelationId,
+      archiveJobLevel,
+      archiveJobIdFilter,
+      archiveJobFrom,
+      archiveJobTo
+    ],
+    queryFn: () =>
+      apiFetch<ArchiveJobEventsResponse>(
+        `/jobs/archive/events?${new URLSearchParams({
+          limit: "25",
+          offset: String(archiveJobOffset),
+          ...(archiveJobSearch ? { search: archiveJobSearch } : {}),
+          ...(archiveJobType ? { type: archiveJobType } : {}),
+          ...(archiveJobCorrelationId ? { correlationId: archiveJobCorrelationId } : {}),
+          ...(archiveJobLevel ? { level: archiveJobLevel } : {}),
+          ...(archiveJobIdFilter ? { jobId: archiveJobIdFilter } : {}),
+          ...(archiveJobFrom ? { from: new Date(archiveJobFrom).toISOString() } : {}),
+          ...(archiveJobTo ? { to: new Date(archiveJobTo).toISOString() } : {})
+        }).toString()}`
+      ),
     enabled: meQuery.data?.user?.role === "SUPER_ADMIN"
   });
 
@@ -410,6 +537,25 @@ export default function AdminPage() {
     mutationFn: () => apiFetch("/jobs/maintenance/retention-cleanup", { method: "POST" }),
     onSuccess: () => {
       setStatusMessage("Retention cleanup job queued");
+      void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
+      void queryClient.invalidateQueries({ queryKey: ["jobs", "maintenance-status"] });
+    }
+  });
+
+  const runSchedulerTaskMutation = useMutation({
+    mutationFn: (task: SchedulerTaskKey) =>
+      apiFetch<{
+        task: SchedulerTaskKey;
+        result: "queued" | "skipped_active" | "failed" | "skipped_disabled";
+        jobId: string | null;
+        error: string | null;
+      }>(`/jobs/maintenance/tasks/${task}/run-once`, { method: "POST" }),
+    onSuccess: (result) => {
+      const message =
+        result.result === "queued"
+          ? `Task ${result.task} queued (${result.jobId ?? "no-job-id"})`
+          : `Task ${result.task} ${result.result}${result.error ? `: ${result.error}` : ""}`;
+      setStatusMessage(message);
       void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
       void queryClient.invalidateQueries({ queryKey: ["jobs", "maintenance-status"] });
     }
@@ -822,39 +968,76 @@ export default function AdminPage() {
               <div className="mt-1">Archive enabled: {maintenanceStatusQuery.data.archive.enabled ? "yes" : "no"}</div>
               <div>Archive counts: audit {maintenanceStatusQuery.data.archive.auditLogArchiveCount} / events {maintenanceStatusQuery.data.archive.jobEventArchiveCount}</div>
               <div>Last archived at: {maintenanceStatusQuery.data.archive.lastArchivedAt ?? "-"}</div>
+              <div>
+                Archive lifecycle windows: audit {maintenanceStatusQuery.data.archive.policy.archiveAuditLogDays}d / security audit{" "}
+                {maintenanceStatusQuery.data.archive.policy.archiveSecurityAuditDays}d / job events{" "}
+                {maintenanceStatusQuery.data.archive.policy.archiveJobEventDays}d
+              </div>
               <div className="mt-1">
                 Last retention run:{" "}
                 {maintenanceStatusQuery.data.retentionLastRun
                   ? `${maintenanceStatusQuery.data.retentionLastRun.ranAt} (${maintenanceStatusQuery.data.retentionLastRun.status}, ${maintenanceStatusQuery.data.retentionLastRun.reason})`
                   : "-"}
               </div>
+              {maintenanceStatusQuery.data.retentionLastRun ? (
+                <div>
+                  Last archive purge: {maintenanceStatusQuery.data.retentionLastRun.archivePurged.jobEvents ?? 0} job events /{" "}
+                  {((maintenanceStatusQuery.data.retentionLastRun.archivePurged.auditLogsGeneral ?? 0) +
+                    (maintenanceStatusQuery.data.retentionLastRun.archivePurged.auditLogsSecurity ?? 0))}{" "}
+                  audit rows
+                </div>
+              ) : null}
               {maintenanceStatusQuery.data.retentionLastRun?.error ? (
                 <div className="text-red-700">Last retention error: {maintenanceStatusQuery.data.retentionLastRun.error}</div>
               ) : null}
               <div className="mt-2 font-medium text-slate-800">
                 Scheduler: {maintenanceStatusQuery.data.scheduler.enabled ? "enabled" : "disabled"} (tick {maintenanceStatusQuery.data.scheduler.tickSeconds}s)
               </div>
+              <div>Scheduler heartbeat: {maintenanceStatusQuery.data.scheduler.lastHeartbeatAt ?? "-"}</div>
               <div className="mt-1 overflow-auto rounded border border-slate-200 bg-white">
                 <table className="min-w-full text-[11px]">
                   <thead className="bg-slate-50 text-left uppercase text-slate-500">
                     <tr>
                       <th className="px-2 py-1">Task</th>
+                      <th className="px-2 py-1">Enabled</th>
                       <th className="px-2 py-1">Interval</th>
+                      <th className="px-2 py-1">Trigger</th>
                       <th className="px-2 py-1">Last result</th>
+                      <th className="px-2 py-1">Last success</th>
+                      <th className="px-2 py-1">Last failure</th>
                       <th className="px-2 py-1">Last run</th>
                       <th className="px-2 py-1">Next run</th>
                       <th className="px-2 py-1">Last job</th>
+                      <th className="px-2 py-1">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {maintenanceStatusQuery.data.scheduler.tasks.map((task) => (
                       <tr key={task.task}>
                         <td className="px-2 py-1">{task.task}</td>
-                        <td className="px-2 py-1">{task.enabled ? `${task.intervalMinutes}m` : "disabled"}</td>
+                        <td className="px-2 py-1">{task.enabled ? "yes" : "no"}</td>
+                        <td className="px-2 py-1">{task.intervalMinutes > 0 ? `${task.intervalMinutes}m` : "-"}</td>
+                        <td className="px-2 py-1">{task.lastTrigger ?? "-"}</td>
                         <td className="px-2 py-1">{task.lastResult ?? "-"}</td>
+                        <td className="px-2 py-1">{task.lastSuccessAt ?? "-"}</td>
+                        <td className="px-2 py-1">{task.lastFailureAt ?? "-"}</td>
                         <td className="px-2 py-1">{task.lastRunAt ?? "-"}</td>
                         <td className="px-2 py-1">{task.nextRunAt ?? "-"}</td>
                         <td className="px-2 py-1">{task.lastJobId ?? "-"}</td>
+                        <td className="px-2 py-1">
+                          {meQuery.data?.user?.role === "SUPER_ADMIN" ? (
+                            <button
+                              className="rounded border border-slate-300 px-2 py-1 text-[10px]"
+                              onClick={() => {
+                                void runSchedulerTaskMutation.mutate(task.task);
+                              }}
+                            >
+                              Run once
+                            </button>
+                          ) : (
+                            "-"
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -935,7 +1118,7 @@ export default function AdminPage() {
                   Selected job: <span className="font-mono">{selectedJobId}</span>
                 </p>
                 {jobDetailQuery.isLoading ? (
-                  <p className="mt-2 text-xs text-slate-500">Loading timeline…</p>
+                  <p className="mt-2 text-xs text-slate-500">Loading timeline...</p>
                 ) : null}
                 {jobDetailQuery.data ? (
                   <div className="mt-3 space-y-2">
@@ -1043,6 +1226,239 @@ export default function AdminPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </section>
+      ) : null}
+
+      {meQuery.data?.user?.role === "SUPER_ADMIN" ? (
+        <section className="mt-6 rounded-xl border border-slate-200 bg-white p-4">
+          <h2 className="text-base font-semibold text-slate-900">Archive browser</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            Read-only access to archived operational history. Data is filtered and paginated.
+          </p>
+
+          <div className="mt-4 rounded border border-slate-200 p-3">
+            <h3 className="text-sm font-semibold text-slate-800">Archived audit logs</h3>
+            <div className="mt-2 grid gap-2 md:grid-cols-6">
+              <input
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                placeholder="search action/entity"
+                value={archiveAuditSearch}
+                onChange={(event) => {
+                  setArchiveAuditOffset(0);
+                  setArchiveAuditSearch(event.target.value);
+                }}
+              />
+              <input
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                placeholder="action contains"
+                value={archiveAuditAction}
+                onChange={(event) => {
+                  setArchiveAuditOffset(0);
+                  setArchiveAuditAction(event.target.value);
+                }}
+              />
+              <input
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                placeholder="correlation id"
+                value={archiveAuditCorrelationId}
+                onChange={(event) => {
+                  setArchiveAuditOffset(0);
+                  setArchiveAuditCorrelationId(event.target.value);
+                }}
+              />
+              <input
+                type="datetime-local"
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                value={archiveAuditFrom}
+                onChange={(event) => {
+                  setArchiveAuditOffset(0);
+                  setArchiveAuditFrom(event.target.value);
+                }}
+              />
+              <input
+                type="datetime-local"
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                value={archiveAuditTo}
+                onChange={(event) => {
+                  setArchiveAuditOffset(0);
+                  setArchiveAuditTo(event.target.value);
+                }}
+              />
+              <button
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                onClick={() => {
+                  void archiveAuditQuery.refetch();
+                }}
+              >
+                Refresh
+              </button>
+            </div>
+            <div className="mt-2 max-h-64 overflow-auto rounded border border-slate-200">
+              <table className="min-w-full text-xs">
+                <thead className="bg-slate-50 text-left uppercase text-slate-500">
+                  <tr>
+                    <th className="px-2 py-1">Created</th>
+                    <th className="px-2 py-1">Action</th>
+                    <th className="px-2 py-1">Entity</th>
+                    <th className="px-2 py-1">Target</th>
+                    <th className="px-2 py-1">Correlation</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {archiveAuditQuery.data?.items.map((item) => (
+                    <tr key={item.id}>
+                      <td className="px-2 py-1">{item.createdAt}</td>
+                      <td className="px-2 py-1">{item.action}</td>
+                      <td className="px-2 py-1">{item.entityType}</td>
+                      <td className="px-2 py-1">{item.entityId ?? "-"}</td>
+                      <td className="max-w-52 truncate px-2 py-1 font-mono text-[11px]">{item.correlationId ?? "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-2 flex items-center justify-between text-xs text-slate-600">
+              <span>
+                Showing {archiveAuditQuery.data?.items.length ?? 0} / {archiveAuditQuery.data?.total ?? 0}
+              </span>
+              <div className="space-x-2">
+                <button
+                  className="rounded border border-slate-300 px-2 py-1"
+                  disabled={archiveAuditOffset === 0}
+                  onClick={() => setArchiveAuditOffset((prev) => Math.max(prev - 25, 0))}
+                >
+                  Prev
+                </button>
+                <button
+                  className="rounded border border-slate-300 px-2 py-1"
+                  disabled={(archiveAuditQuery.data?.offset ?? 0) + (archiveAuditQuery.data?.limit ?? 25) >= (archiveAuditQuery.data?.total ?? 0)}
+                  onClick={() => setArchiveAuditOffset((prev) => prev + 25)}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded border border-slate-200 p-3">
+            <h3 className="text-sm font-semibold text-slate-800">Archived job events</h3>
+            <div className="mt-2 grid gap-2 md:grid-cols-7">
+              <input
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                placeholder="search type/message"
+                value={archiveJobSearch}
+                onChange={(event) => {
+                  setArchiveJobOffset(0);
+                  setArchiveJobSearch(event.target.value);
+                }}
+              />
+              <input
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                placeholder="type contains"
+                value={archiveJobType}
+                onChange={(event) => {
+                  setArchiveJobOffset(0);
+                  setArchiveJobType(event.target.value);
+                }}
+              />
+              <input
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                placeholder="jobId"
+                value={archiveJobIdFilter}
+                onChange={(event) => {
+                  setArchiveJobOffset(0);
+                  setArchiveJobIdFilter(event.target.value);
+                }}
+              />
+              <input
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                placeholder="correlation id"
+                value={archiveJobCorrelationId}
+                onChange={(event) => {
+                  setArchiveJobOffset(0);
+                  setArchiveJobCorrelationId(event.target.value);
+                }}
+              />
+              <select
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                value={archiveJobLevel}
+                onChange={(event) => {
+                  setArchiveJobOffset(0);
+                  setArchiveJobLevel(event.target.value as "" | "INFO" | "WARN" | "ERROR");
+                }}
+              >
+                <option value="">level:any</option>
+                <option value="INFO">INFO</option>
+                <option value="WARN">WARN</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+              <input
+                type="datetime-local"
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                value={archiveJobFrom}
+                onChange={(event) => {
+                  setArchiveJobOffset(0);
+                  setArchiveJobFrom(event.target.value);
+                }}
+              />
+              <input
+                type="datetime-local"
+                className="rounded border border-slate-300 px-2 py-1 text-xs"
+                value={archiveJobTo}
+                onChange={(event) => {
+                  setArchiveJobOffset(0);
+                  setArchiveJobTo(event.target.value);
+                }}
+              />
+            </div>
+            <div className="mt-2 max-h-64 overflow-auto rounded border border-slate-200">
+              <table className="min-w-full text-xs">
+                <thead className="bg-slate-50 text-left uppercase text-slate-500">
+                  <tr>
+                    <th className="px-2 py-1">Created</th>
+                    <th className="px-2 py-1">Job</th>
+                    <th className="px-2 py-1">Type</th>
+                    <th className="px-2 py-1">Level</th>
+                    <th className="px-2 py-1">Message</th>
+                    <th className="px-2 py-1">Correlation</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {archiveJobEventsQuery.data?.items.map((item) => (
+                    <tr key={item.id}>
+                      <td className="px-2 py-1">{item.createdAt}</td>
+                      <td className="px-2 py-1">{item.jobId}</td>
+                      <td className="px-2 py-1">{item.type}</td>
+                      <td className="px-2 py-1">{item.level}</td>
+                      <td className="px-2 py-1">{item.message}</td>
+                      <td className="max-w-52 truncate px-2 py-1 font-mono text-[11px]">{item.correlationId ?? "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-2 flex items-center justify-between text-xs text-slate-600">
+              <span>
+                Showing {archiveJobEventsQuery.data?.items.length ?? 0} / {archiveJobEventsQuery.data?.total ?? 0}
+              </span>
+              <div className="space-x-2">
+                <button
+                  className="rounded border border-slate-300 px-2 py-1"
+                  disabled={archiveJobOffset === 0}
+                  onClick={() => setArchiveJobOffset((prev) => Math.max(prev - 25, 0))}
+                >
+                  Prev
+                </button>
+                <button
+                  className="rounded border border-slate-300 px-2 py-1"
+                  disabled={(archiveJobEventsQuery.data?.offset ?? 0) + (archiveJobEventsQuery.data?.limit ?? 25) >= (archiveJobEventsQuery.data?.total ?? 0)}
+                  onClick={() => setArchiveJobOffset((prev) => prev + 25)}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
           </div>
         </section>
       ) : null}

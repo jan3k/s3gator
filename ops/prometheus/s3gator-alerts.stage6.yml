@@ -1,5 +1,5 @@
 groups:
-  - name: s3gator-stage7-alerts
+  - name: s3gator-stage6-alerts
     rules:
       - alert: S3GatorHighLoginFailureRate
         expr: sum(rate(s3gator_login_total{result="failure"}[10m])) > 0.5
@@ -81,15 +81,6 @@ groups:
         annotations:
           summary: "Maintenance scheduler task failed"
           description: "At least one scheduled maintenance task failed recently."
-
-      - alert: S3GatorArchiveGovernanceDeletesStopped
-        expr: increase(s3gator_archive_governance_deleted_records_total[24h]) == 0
-        for: 24h
-        labels:
-          severity: info
-        annotations:
-          summary: "Archive governance did not delete any records in 24h"
-          description: "Check whether archive retention windows are expected to produce no deletions."
 
       - alert: S3GatorApiDown
         expr: up{job="s3gator-api"} == 0

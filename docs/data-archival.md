@@ -4,39 +4,44 @@ Date: 2026-04-10
 
 ## Purpose
 
-Stage 6 adds an optional archive tier to retain operational diagnostics while limiting growth of hot operational tables.
+Archive mode keeps longer-lived operational diagnostics while controlling hot-table growth.
 
 ## Archive Tables
 
 - `AuditLogArchive`
 - `JobEventArchive`
 
-Hot tables remain:
+## Hot-to-Archive Mode
 
-- `audit_logs`
-- `job_events`
+Controlled by:
 
-## Enable/Disable
+- `RETENTION_ARCHIVE_ENABLED`
+- `RETENTION_ARCHIVE_BATCH_SIZE`
 
-- `RETENTION_ARCHIVE_ENABLED=false` (default): hard-delete mode
-- `RETENTION_ARCHIVE_ENABLED=true`: archive+prune mode
-- `RETENTION_ARCHIVE_BATCH_SIZE` controls copy+delete batch size
+Behavior:
 
-## Archive Behavior
+1. select expired hot rows
+2. copy into archive tables
+3. prune copied hot rows
 
-When enabled, retention cleanup:
+## Stage 7 Archive Governance
 
-1. selects expired rows
-2. inserts archive rows (`source*Id` uniqueness protects against accidental duplicates)
-3. deletes source rows from hot tables
+Archive tables now have second-level lifecycle windows:
 
-Security metadata redaction policy remains unchanged; archive rows preserve already-sanitized payloads.
+- `ARCHIVE_RETENTION_AUDIT_LOG_DAYS`
+- `ARCHIVE_RETENTION_SECURITY_AUDIT_DAYS`
+- `ARCHIVE_RETENTION_JOB_EVENT_DAYS`
 
-## Operator Visibility
+This keeps archive bounded while retaining security-relevant audit rows longer.
 
-Maintenance status API/UI exposes:
+## Access Model
 
-- archive enabled flag
-- archive row counts
-- last archive timestamp
-- last retention run state
+Archive browsing is read-only and limited to `SUPER_ADMIN` via:
+
+- `GET /admin/audit/archive`
+- `GET /jobs/archive/events`
+
+## Notes
+
+- Archive rows keep redacted/safe metadata policy.
+- Archive is operational storage in same DB, not immutable cold storage.

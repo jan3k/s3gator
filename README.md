@@ -42,11 +42,14 @@ S3Gator intentionally follows Garage realities:
 - Job retry/reclaim visibility in API and admin UI (`attemptCount`, `maxAttempts`, `nextRetryAt`, retry exhaustion events).
 - Operational data retention controls for `job_events`, `audit_logs`, terminal jobs, and terminal upload sessions.
 - Optional archive tier for operational history (`AuditLogArchive`, `JobEventArchive`) with archive+prune mode.
-- Scheduled maintenance with Redis leader lock and per-task scheduler state.
+- Second-level archive governance windows for archive tables (audit/job-event lifecycle).
+- Safe SUPER_ADMIN archive browser APIs/UI with filtering and pagination.
+- Scheduled maintenance with Redis leader lock, per-task enable flags, richer status, and safe run-once triggers.
 - Resumable multipart upload sessions with persisted part state.
 - Prometheus metrics + health endpoints.
 - Correlation IDs + OpenTelemetry hooks for API and worker paths.
-- Operational observability assets (`ops/grafana`, `ops/prometheus`).
+- Deterministic reliability CI lane (`integration:reliability:ci`) for retry/restart/contention invariants.
+- Operational observability assets with provisioning templates (`ops/grafana`, `ops/prometheus`, `ops/alertmanager`).
 - Admin panel with:
   - users/roles,
   - bucket grants/scopes,
@@ -138,6 +141,12 @@ Run reliability v2 lane (baseline reclaim + retry/restart/contention scenario):
 npx pnpm integration:reliability:v2
 ```
 
+Run deterministic reliability CI lane (v2 + Stage 7 duplicate-prevention/non-retryable checks):
+
+```bash
+npx pnpm integration:reliability:ci
+```
+
 Re-run bootstrap only:
 
 ```bash
@@ -160,6 +169,12 @@ Run scheduler tick once manually (operator command):
 
 ```bash
 npx pnpm maintenance:scheduler:run-once
+```
+
+Validate observability asset packaging/provisioning files:
+
+```bash
+npx pnpm ops:validate-assets
 ```
 
 ## Default Seed Account
@@ -187,6 +202,12 @@ Change defaults immediately outside local development.
 - [docs/reliability.md](docs/reliability.md)
 - [docs/slo-sli.md](docs/slo-sli.md)
 - [docs/observability-assets.md](docs/observability-assets.md)
+- [docs/archive-governance.md](docs/archive-governance.md)
+- [docs/archive-access.md](docs/archive-access.md)
+- [docs/scheduler-operations.md](docs/scheduler-operations.md)
+- [docs/reliability-ci.md](docs/reliability-ci.md)
+- [docs/observability-provisioning.md](docs/observability-provisioning.md)
+- [docs/stage7-plan.md](docs/stage7-plan.md)
 - [docs/stage6-plan.md](docs/stage6-plan.md)
 - [docs/stage2-hardening-plan.md](docs/stage2-hardening-plan.md)
 - [docs/stage3-plan.md](docs/stage3-plan.md)
@@ -199,3 +220,4 @@ Change defaults immediately outside local development.
 - Job cancel is best-effort and may wait for in-flight S3 calls to finish before stopping.
 - Garage bootstrap automation is designed for dev/integration/CI environments and should not be used as-is for production secret lifecycle management.
 - Archive mode is optional and defaults to disabled; hard-delete-only remains the default retention mode.
+- Archive tier is in the same PostgreSQL database (operational archive), not immutable cold-storage/compliance storage.

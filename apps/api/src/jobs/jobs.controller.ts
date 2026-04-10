@@ -17,6 +17,22 @@ const eventsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(1000).optional()
 });
 
+const archiveEventsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  offset: z.coerce.number().int().min(0).max(1_000_000).optional(),
+  jobId: z.string().min(1).optional(),
+  type: z.string().min(1).max(200).optional(),
+  level: z.enum(["INFO", "WARN", "ERROR"]).optional(),
+  correlationId: z.string().min(1).max(200).optional(),
+  search: z.string().min(1).max(200).optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional()
+});
+
+const schedulerTaskParamSchema = z.object({
+  task: z.enum(["retention_cleanup", "upload_cleanup", "bucket_sync"])
+});
+
 @Controller("jobs")
 export class JobsController {
   constructor(
@@ -33,6 +49,22 @@ export class JobsController {
 
     const parsed = listSchema.parse(query);
     return this.jobsService.list(actor, parsed);
+  }
+
+  @Get("archive/events")
+  @UseGuards(RoleGuard)
+  @RequireRoles("SUPER_ADMIN")
+  listArchivedEvents(@CurrentUser() actor: AuthenticatedRequest["user"], @Query() query: unknown) {
+    if (!actor) {
+      return {
+        items: [],
+        total: 0,
+        limit: 100,
+        offset: 0
+      };
+    }
+
+    return this.jobsService.listArchivedEvents(actor, archiveEventsQuerySchema.parse(query));
   }
 
   @Get(":id")
@@ -140,5 +172,21 @@ export class JobsController {
       reason: "manual",
       correlationId: req.correlationId
     });
+  }
+
+  @Post("maintenance/tasks/:task/run-once")
+  @UseGuards(RoleGuard)
+  @RequireRoles("SUPER_ADMIN")
+  runTaskNow(
+    @CurrentUser() actor: AuthenticatedRequest["user"],
+    @Param() params: unknown,
+    @Req() req: AuthenticatedRequest
+  ) {
+    if (!actor) {
+      return null;
+    }
+
+    const parsed = schedulerTaskParamSchema.parse(params);
+    return this.schedulerService.runTaskNow(parsed.task, actor, req.correlationId);
   }
 }

@@ -28,6 +28,7 @@ export class MetricsService {
   private readonly retentionCleanupCounter: Counter<"result">;
   private readonly retentionDeletedCounter: Counter<"entity">;
   private readonly retentionArchivedCounter: Counter<"entity">;
+  private readonly archiveGovernanceDeletedCounter: Counter<"entity">;
   private readonly schedulerRunCounter: Counter<"task" | "result">;
 
   constructor() {
@@ -138,6 +139,13 @@ export class MetricsService {
       registers: [this.registry]
     });
 
+    this.archiveGovernanceDeletedCounter = new Counter({
+      name: "s3gator_archive_governance_deleted_records_total",
+      help: "Second-level archive lifecycle cleanup deleted record counters",
+      labelNames: ["entity"],
+      registers: [this.registry]
+    });
+
     this.schedulerRunCounter = new Counter({
       name: "s3gator_scheduler_runs_total",
       help: "Maintenance scheduler task outcomes",
@@ -203,6 +211,13 @@ export class MetricsService {
       return;
     }
     this.retentionArchivedCounter.inc({ entity }, count);
+  }
+
+  recordArchiveGovernanceDeleted(entity: "job_events_archive" | "audit_logs_archive", count: number): void {
+    if (count <= 0) {
+      return;
+    }
+    this.archiveGovernanceDeletedCounter.inc({ entity }, count);
   }
 
   recordSchedulerRun(

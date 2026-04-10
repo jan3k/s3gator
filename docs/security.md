@@ -37,52 +37,65 @@ Date: 2026-04-10
 - API response DTOs omit secret ciphertext columns.
 - Redaction applies to password/token/secret-like keys recursively for logs and audit metadata.
 
-## Audit and Job Event Trail
+## Audit, Jobs, and Archive Security
 
-`audit_logs` records security/operational events, including:
+`audit_logs` + `job_events` persist security and operational trails.
 
-- auth success/failures and logout,
-- user/role/status/password admin operations,
-- LDAP/auth-mode/config changes,
-- bucket grant/scope changes,
-- connection changes/health checks,
-- destructive object/folder operations,
-- multipart completion/abort/fail,
-- bucket sync actions.
+Stage 6 archive mode copies hot records into:
 
-Stage 4 also adds `job_events` timeline persistence for operator diagnostics:
+- `AuditLogArchive`
+- `JobEventArchive`
 
-- lifecycle events (`created`, `claimed`, `started`, `progress`, `failed`, `completed`, `canceled*`),
-- domain-step events with structured metadata,
-- correlation IDs for cross-runtime traceability.
+Stage 7 archive governance adds second-level lifecycle windows:
 
-Stage 5 adds:
+- `ARCHIVE_RETENTION_AUDIT_LOG_DAYS`
+- `ARCHIVE_RETENTION_SECURITY_AUDIT_DAYS`
+- `ARCHIVE_RETENTION_JOB_EVENT_DAYS`
 
-- explicit retry/reclaim timeline events (`retry_*`, `reclaimed`),
-- retained/cleanup operational lifecycle controls for `job_events` and `audit_logs`,
-- longer retention window for security-relevant audit actions vs general audit noise.
+Security-relevant archive audit records are retained longer than routine archive records by policy.
 
-Stage 6 extends this with:
+## Safe Archive Access Controls
 
-- optional archive tier for `audit_logs` and `job_events` (`*_archive` tables),
-- scheduler-driven maintenance with explicit task result state (`queued`, `skipped_active`, `failed`),
-- maintenance status visibility in admin/API without exposing secrets.
+Stage 7 adds read-only archive browse APIs/UI with strict constraints:
+
+- archive API is `SUPER_ADMIN` only,
+- deterministic pagination/sorting,
+- bounded safe search fields,
+- no secret material exposure,
+- existing redaction guarantees preserved.
+
+Endpoints:
+
+- `GET /admin/audit/archive`
+- `GET /jobs/archive/events`
+
+## Scheduler and Maintenance Security
+
+Scheduler remains in-process and Redis-lock coordinated.
+
+Stage 7 hardening:
+
+- per-task enable flags,
+- lock TTL safety guard,
+- explicit scheduled/manual trigger metadata,
+- safe manual run-once API (`POST /jobs/maintenance/tasks/:task/run-once`) restricted to `SUPER_ADMIN`.
+
+Duplicate active maintenance jobs are prevented by active-job checks + lock coordination.
 
 ## Correlation IDs and Telemetry Security
 
 - API assigns/propagates request correlation IDs (`x-request-id` by default).
-- Correlation IDs are included in logs, jobs, and timeline events.
-- OTEL export is opt-in via env and does not include plaintext secret fields by design.
+- Correlation IDs are included in logs, jobs, timeline events, and audit context metadata.
+- OTEL export is opt-in and does not include plaintext secrets by design.
 
 ## Integration/CI Security Posture
 
-- Stage 4 integration bootstrap provisions deterministic dev/test credentials and bucket aliases.
-- These integration defaults are for non-production environments only.
-- Production should use separate credentials, stronger secret lifecycle management, and restricted network access.
+- Integration bootstrap provisions deterministic dev/test credentials and bucket aliases only for non-production usage.
+- Reliability CI lane intentionally exercises failure/restart scenarios and should run on isolated non-production environments.
+- Production secret lifecycle and credential rotation remain operator responsibilities outside bootstrap scripts.
 
-## Known Security Limitations
+## Known Security Boundaries
 
 - Fine-grained object-level ABAC beyond bucket capabilities is not implemented.
 - Job cancellation is best-effort when underlying S3 calls are already in-flight.
-- Full SIEM export pipeline is out of scope by default (logs/metrics/traces hooks are available).
-- Archive mode is optional and disabled by default; if disabled, retention remains hard-delete and operators should export externally for longer compliance windows.
+- Archive tier is an operational archive in the same database, not immutable compliance cold storage.

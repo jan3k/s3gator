@@ -45,6 +45,10 @@ const prisma = {
     create: vi.fn(),
     findMany: vi.fn()
   },
+  jobEventArchive: {
+    findMany: vi.fn(),
+    count: vi.fn()
+  },
   adminBucketScope: {
     findMany: vi.fn()
   }
@@ -371,5 +375,71 @@ describe("JobsService scoped admin access", () => {
         })
       })
     );
+  });
+
+  it("lists archived job events for SUPER_ADMIN with deterministic ordering/filter support", async () => {
+    prisma.jobEventArchive.findMany.mockResolvedValue([
+      {
+        id: "arch-evt-1",
+        sourceJobEventId: "evt-1",
+        jobId: "job-9",
+        jobType: "BUCKET_SYNC",
+        jobStatus: "FAILED",
+        correlationId: "req-777",
+        type: "retry_exhausted",
+        level: "ERROR",
+        message: "Retry exhausted",
+        metadata: { attemptCount: 5 },
+        createdAt: new Date("2026-04-10T11:00:00.000Z"),
+        archivedAt: new Date("2026-04-10T12:00:00.000Z")
+      }
+    ]);
+    prisma.jobEventArchive.count.mockResolvedValue(1);
+
+    const result = await service.listArchivedEvents(
+      {
+        id: "super-1",
+        username: "root",
+        email: "root@example.com",
+        displayName: "Root",
+        role: "SUPER_ADMIN"
+      },
+      {
+        limit: 50,
+        offset: 0,
+        type: "retry",
+        level: "ERROR",
+        correlationId: "req-777"
+      }
+    );
+
+    expect(prisma.jobEventArchive.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        where: expect.objectContaining({
+          level: "ERROR",
+          correlationId: { equals: "req-777" }
+        })
+      })
+    );
+    expect(result.total).toBe(1);
+    expect(result.items[0]?.id).toBe("arch-evt-1");
+  });
+
+  it("blocks archived job events for ADMIN users", async () => {
+    await expect(
+      service.listArchivedEvents(
+        {
+          id: "admin-1",
+          username: "admin",
+          email: "admin@example.com",
+          displayName: "Admin",
+          role: "ADMIN"
+        },
+        {
+          limit: 10
+        }
+      )
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 });

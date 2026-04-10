@@ -17,7 +17,8 @@
     "lint": "eslint --max-warnings=0 \"src/**/*.ts\"",
     "test": "vitest run",
     "prisma": "prisma",
-    "seed": "tsx src/bootstrap/seed.ts"
+    "seed": "tsx src/bootstrap/seed.ts",
+    "integration:reliability:ci": "tsx src/maintenance/reliability-ci-check.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",

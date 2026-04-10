@@ -1,0 +1,225 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "S3Gator Stage 7 operational dashboard",
+  "editable": true,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Login Failures / 5m",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(s3gator_login_total{result=\"failure\"}[5m]))",
+          "legendFormat": "login failures"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "LDAP Failures / 5m",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(s3gator_ldap_auth_failures_total[5m]))",
+          "legendFormat": "ldap failures"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Upload Failures / 5m",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(s3gator_upload_events_total{event=\"fail\"}[5m]))",
+          "legendFormat": "upload failures"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Job Failures / 5m",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(s3gator_jobs_total{status=\"fail\"}[5m]))",
+          "legendFormat": "job failures"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retry Scheduled / Exhausted / 5m",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(s3gator_job_retries_total{event=\"scheduled\"}[5m]))",
+          "legendFormat": "retry scheduled"
+        },
+        {
+          "expr": "sum(rate(s3gator_job_retries_total{event=\"exhausted\"}[5m]))",
+          "legendFormat": "retry exhausted"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reclaims / 5m",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(s3gator_job_reclaims_total[5m]))",
+          "legendFormat": "reclaims"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "S3 Operation Failures / 5m",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(s3gator_s3_failures_total[5m])) by (operation)",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retention Cleanup Failures / 5m",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(s3gator_retention_cleanup_total{result=\"failure\"}[5m]))",
+          "legendFormat": "retention failures"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scheduler Failures / 5m",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(s3gator_scheduler_runs_total{result=\"failed\"}[5m])) by (task)",
+          "legendFormat": "{{task}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Archived Records Total",
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "sum(s3gator_retention_archived_records_total)",
+          "legendFormat": "archived"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Deleted Records Total",
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "expr": "sum(s3gator_retention_deleted_records_total)",
+          "legendFormat": "deleted"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Archive Governance Deletes Total",
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "targets": [
+        {
+          "expr": "sum(s3gator_archive_governance_deleted_records_total)",
+          "legendFormat": "archive governance deleted"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "s3gator",
+    "stage7",
+    "operations"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "title": "S3Gator Stage 7 Operations",
+  "uid": "s3gator-stage7-ops",
+  "version": 1
+}

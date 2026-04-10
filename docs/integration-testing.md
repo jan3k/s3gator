@@ -2,11 +2,9 @@
 
 Date: 2026-04-10
 
-## Test Lanes
+## Lanes
 
-## Fast lane
-
-Runs quickly without full dependency stack:
+### Fast lane
 
 ```bash
 npx pnpm lint
@@ -15,9 +13,9 @@ npx pnpm test
 npx pnpm test:e2e
 ```
 
-## Full integration lane
+### Full integration lane
 
-Runs against real stack:
+Uses real stack:
 
 - PostgreSQL
 - Redis
@@ -33,44 +31,28 @@ npx pnpm integration:up
 npx pnpm integration:test
 npx pnpm integration:reliability
 npx pnpm integration:reliability:v2
+npx pnpm integration:reliability:ci
 npx pnpm integration:down
 ```
 
-`integration:test` runs bootstrap first and then executes Playwright integration suite (`test/e2e-integration`).
-`integration:reliability` runs bootstrap and then executes worker interruption/reclaim validation (`apps/api/src/maintenance/reliability-check.ts`).
-`integration:reliability:v2` runs baseline reclaim scenario and then retry+restart+contention scenario (`apps/api/src/maintenance/reliability-v2-check.ts`).
+`integration:up` includes deterministic Garage/app bootstrap.
 
-## Integration E2E Coverage
+## Playwright Integration Coverage
 
-Current scenarios validate:
+`integration:test` validates at least:
 
 1. local login and files page visibility
 2. admin bucket sync queue visibility
-3. bucket visibility + real upload + rename/delete job queueing
-4. admin grant update flow
-5. job timeline visibility in admin UI
+3. bucket visibility + real upload + post-upload listing behavior
+4. rename/delete background-job flow visibility
+5. admin grant update flow
+6. job timeline visibility in admin UI
 
 ## Reliability Coverage
 
-`integration:reliability` validates:
+`integration:reliability:ci` provides deterministic Stage 7 checks suitable for CI as a dedicated reliability lane.
 
-1. queue long-running folder rename job
-2. interrupt worker container while job is running
-3. restart worker after lock TTL window
-4. verify reclaim signal in job timeline
-5. verify single terminal completion event (no duplicate finalization)
-
-`integration:reliability:v2` additionally validates:
-
-1. retryable bucket sync reschedule path
-2. restart during retry lifecycle
-3. multi-worker claim contention
-4. coherent retry timeline and single terminal event invariants
-
-## Notes
-
-- Full lane keeps `INTEGRATION_E2E=1` gating internally in the integration test wrapper.
-- If setup fails, check service logs with:
+## Debugging
 
 ```bash
 docker compose -f docker-compose.integration.yml logs api --tail=200

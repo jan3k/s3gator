@@ -1,15 +1,18 @@
-# Observability Assets (Stage 6)
+# Observability Assets (Stage 7)
 
 Date: 2026-04-10
 
 ## Included Assets
 
 - Grafana dashboard JSON:
-  - `ops/grafana/s3gator-stage6-operations.json`
-- Prometheus alert rule examples:
+  - `ops/grafana/dashboards/s3gator-stage7-operations.json`
+- Grafana provisioning examples:
+  - `ops/grafana/provisioning/dashboards/s3gator-dashboards.yml`
+  - `ops/grafana/provisioning/datasources/s3gator-prometheus.yml`
+- Prometheus alert rules:
   - `ops/prometheus/s3gator-alerts.yml`
-
-These assets map to real metrics exposed by `GET /metrics`.
+- Alertmanager routing example:
+  - `ops/alertmanager/s3gator-routing.example.yml`
 
 ## Covered Signals
 
@@ -22,14 +25,22 @@ These assets map to real metrics exposed by `GET /metrics`.
 - S3 failure trends
 - retention cleanup failures
 - scheduler task failures
-- retained/deleted record counters
+- retention archived/deleted counters
+- archive governance delete counters
+
+## Validation
+
+```bash
+npx pnpm ops:validate-assets
+```
 
 ## Import Notes
 
-1. Import dashboard JSON into Grafana.
-2. Add alert rules file to Prometheus rule loading config.
-3. Adjust thresholds to environment-specific baseline traffic.
+1. Import dashboard JSON into Grafana or mount with provisioning.
+2. Add dashboard/datasource provisioning YAML under Grafana provisioning path.
+3. Load Prometheus rule file from `ops/prometheus/s3gator-alerts.yml`.
+4. Copy `ops/alertmanager/s3gator-routing.example.yml` and adapt receivers/routes.
 
 ## Metric Prerequisites
 
-Ensure Prometheus scrapes API `/metrics` and that labels/job naming match your deployment (`up{job="s3gator-api"}` alert may require adaptation).
+Ensure Prometheus scrapes API `/metrics` and adapt environment-specific target labels (`up{job="s3gator-api"}` may require adjustment).

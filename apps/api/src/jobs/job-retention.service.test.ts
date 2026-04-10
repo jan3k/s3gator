@@ -9,7 +9,10 @@ const configValues: Record<string, unknown> = {
   RETENTION_SECURITY_AUDIT_DAYS: 365,
   RETENTION_UPLOAD_SESSION_DAYS: 30,
   RETENTION_ARCHIVE_ENABLED: false,
-  RETENTION_ARCHIVE_BATCH_SIZE: 500
+  RETENTION_ARCHIVE_BATCH_SIZE: 500,
+  ARCHIVE_RETENTION_AUDIT_LOG_DAYS: 730,
+  ARCHIVE_RETENTION_JOB_EVENT_DAYS: 365,
+  ARCHIVE_RETENTION_SECURITY_AUDIT_DAYS: 1460
 };
 
 const configService = {
@@ -51,10 +54,12 @@ const prisma = {
     findUnique: vi.fn()
   },
   auditLogArchive: {
+    deleteMany: vi.fn(),
     count: vi.fn(),
     findFirst: vi.fn()
   },
   jobEventArchive: {
+    deleteMany: vi.fn(),
     count: vi.fn(),
     findFirst: vi.fn()
   },
@@ -64,7 +69,8 @@ const prisma = {
 const metricsService = {
   recordRetentionCleanup: vi.fn(),
   recordRetentionDeleted: vi.fn(),
-  recordRetentionArchived: vi.fn()
+  recordRetentionArchived: vi.fn(),
+  recordArchiveGovernanceDeleted: vi.fn()
 };
 
 describe("JobRetentionService", () => {
@@ -85,8 +91,10 @@ describe("JobRetentionService", () => {
     prisma.appSetting.findUnique.mockResolvedValue(null);
     prisma.auditLogArchive.count.mockResolvedValue(0);
     prisma.auditLogArchive.findFirst.mockResolvedValue(null);
+    prisma.auditLogArchive.deleteMany.mockResolvedValue({ count: 0 });
     prisma.jobEventArchive.count.mockResolvedValue(0);
     prisma.jobEventArchive.findFirst.mockResolvedValue(null);
+    prisma.jobEventArchive.deleteMany.mockResolvedValue({ count: 0 });
   });
 
   it("returns configured retention policy", () => {
@@ -100,7 +108,10 @@ describe("JobRetentionService", () => {
       securityAuditDays: 365,
       uploadSessionDays: 30,
       archiveEnabled: false,
-      archiveBatchSize: 500
+      archiveBatchSize: 500,
+      archiveAuditLogDays: 730,
+      archiveSecurityAuditDays: 1460,
+      archiveJobEventDays: 365
     });
   });
 
@@ -119,13 +130,17 @@ describe("JobRetentionService", () => {
     expect(metricsService.recordRetentionDeleted).toHaveBeenCalledWith("upload_sessions", 5);
     expect(metricsService.recordRetentionArchived).toHaveBeenCalledWith("job_events", 0);
     expect(metricsService.recordRetentionArchived).toHaveBeenCalledWith("audit_logs", 0);
+    expect(metricsService.recordArchiveGovernanceDeleted).toHaveBeenCalledWith("job_events_archive", 0);
+    expect(metricsService.recordArchiveGovernanceDeleted).toHaveBeenCalledWith("audit_logs_archive", 0);
 
     expect(summary.deleted.jobsCompletedCanceled).toBe(2);
     expect(summary.deleted.jobsFailed).toBe(2);
     expect(summary.deleted.uploadSessions).toBe(5);
+    expect(summary.archivePurged.jobEvents).toBe(0);
     expect(summary.mode).toBe("hard_delete");
     expect(summary.archived.jobEventsCompletedCanceled).toBe(0);
     expect(summary.thresholds.jobEventsBefore).toBeTruthy();
+    expect(summary.thresholds.archiveJobEventsBefore).toBeTruthy();
   });
 
   it("archives and prunes records when archive mode is enabled", async () => {
@@ -213,5 +228,28 @@ describe("JobRetentionService", () => {
     expect(prisma.$transaction).toHaveBeenCalledTimes(4);
     expect(metricsService.recordRetentionArchived).toHaveBeenCalledWith("job_events", 2);
     expect(metricsService.recordRetentionArchived).toHaveBeenCalledWith("audit_logs", 2);
+  });
+
+  it("applies second-level archive governance retention windows", async () => {
+    configValues.RETENTION_ARCHIVE_ENABLED = false;
+
+    prisma.jobEvent.deleteMany.mockResolvedValue({ count: 0 });
+    prisma.auditLog.deleteMany.mockResolvedValue({ count: 0 });
+    prisma.job.deleteMany.mockResolvedValue({ count: 0 });
+    prisma.uploadSession.deleteMany.mockResolvedValue({ count: 0 });
+    prisma.jobEventArchive.deleteMany.mockResolvedValueOnce({ count: 4 });
+    prisma.auditLogArchive.deleteMany
+      .mockResolvedValueOnce({ count: 3 })
+      .mockResolvedValueOnce({ count: 2 });
+
+    const summary = await service.runCleanup();
+
+    expect(summary.archivePurged).toEqual({
+      jobEvents: 4,
+      auditLogsGeneral: 3,
+      auditLogsSecurity: 2
+    });
+    expect(metricsService.recordArchiveGovernanceDeleted).toHaveBeenCalledWith("job_events_archive", 4);
+    expect(metricsService.recordArchiveGovernanceDeleted).toHaveBeenCalledWith("audit_logs_archive", 5);
   });
 });

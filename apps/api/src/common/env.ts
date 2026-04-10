@@ -51,12 +51,27 @@ const envSchema = z.object({
     .transform((value) => (typeof value === "boolean" ? value : value === "true"))
     .default(false),
   RETENTION_ARCHIVE_BATCH_SIZE: z.coerce.number().int().min(10).max(5000).default(500),
+  ARCHIVE_RETENTION_AUDIT_LOG_DAYS: z.coerce.number().int().min(1).max(36500).default(730),
+  ARCHIVE_RETENTION_JOB_EVENT_DAYS: z.coerce.number().int().min(1).max(36500).default(365),
+  ARCHIVE_RETENTION_SECURITY_AUDIT_DAYS: z.coerce.number().int().min(1).max(36500).default(1460),
   MAINTENANCE_SCHEDULER_ENABLED: z
     .union([z.boolean(), z.string()])
     .transform((value) => (typeof value === "boolean" ? value : value === "true"))
     .default(false),
   MAINTENANCE_SCHEDULER_TICK_SECONDS: z.coerce.number().int().min(5).max(3600).default(30),
   MAINTENANCE_SCHEDULER_LOCK_TTL_SECONDS: z.coerce.number().int().min(5).max(3600).default(60),
+  MAINTENANCE_TASK_RETENTION_ENABLED: z
+    .union([z.boolean(), z.string()])
+    .transform((value) => (typeof value === "boolean" ? value : value === "true"))
+    .default(true),
+  MAINTENANCE_TASK_UPLOAD_CLEANUP_ENABLED: z
+    .union([z.boolean(), z.string()])
+    .transform((value) => (typeof value === "boolean" ? value : value === "true"))
+    .default(true),
+  MAINTENANCE_TASK_BUCKET_SYNC_ENABLED: z
+    .union([z.boolean(), z.string()])
+    .transform((value) => (typeof value === "boolean" ? value : value === "true"))
+    .default(false),
   MAINTENANCE_RETENTION_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(10_080).default(360),
   MAINTENANCE_UPLOAD_CLEANUP_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(10_080).default(30),
   MAINTENANCE_BUCKET_SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(10_080).default(0),

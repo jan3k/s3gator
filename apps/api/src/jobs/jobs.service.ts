@@ -58,6 +58,18 @@ interface JobRetryPolicy {
   baseBackoffSeconds: number;
 }
 
+export interface ListArchivedJobEventsInput {
+  limit?: number;
+  offset?: number;
+  jobId?: string;
+  type?: string;
+  level?: JobEventLevel;
+  correlationId?: string;
+  search?: string;
+  from?: string;
+  to?: string;
+}
+
 @Injectable()
 export class JobsService {
   constructor(
@@ -170,6 +182,107 @@ export class JobsService {
     });
 
     return events.map((event) => this.toEventPublic(event));
+  }
+
+  async listArchivedEvents(
+    actor: SessionUser,
+    input: ListArchivedJobEventsInput
+  ): Promise<{
+    items: Array<{
+      id: string;
+      sourceJobEventId: string | null;
+      jobId: string;
+      jobType: string | null;
+      jobStatus: string | null;
+      correlationId: string | null;
+      type: string;
+      level: JobEventLevel;
+      message: string;
+      metadata: Record<string, unknown> | null;
+      createdAt: string;
+      archivedAt: string;
+    }>;
+    total: number;
+    limit: number;
+    offset: number;
+  }> {
+    if (actor.role !== "SUPER_ADMIN") {
+      throw new ForbiddenException("Archived job event access is limited to SUPER_ADMIN");
+    }
+
+    const limit = Math.min(Math.max(input.limit ?? 100, 1), 500);
+    const offset = Math.max(input.offset ?? 0, 0);
+    const fromDate = parseIsoDate(input.from);
+    const toDate = parseIsoDate(input.to);
+
+    const where: Prisma.JobEventArchiveWhereInput = {
+      jobId: input.jobId ?? undefined,
+      type: input.type
+        ? {
+            contains: input.type,
+            mode: "insensitive"
+          }
+        : undefined,
+      level: input.level ?? undefined,
+      correlationId: input.correlationId
+        ? {
+            equals: input.correlationId
+          }
+        : undefined,
+      createdAt:
+        fromDate || toDate
+          ? {
+              gte: fromDate ?? undefined,
+              lte: toDate ?? undefined
+            }
+          : undefined,
+      OR: input.search
+        ? [
+            {
+              type: {
+                contains: input.search,
+                mode: "insensitive"
+              }
+            },
+            {
+              message: {
+                contains: input.search,
+                mode: "insensitive"
+              }
+            }
+          ]
+        : undefined
+    };
+
+    const [items, total] = await Promise.all([
+      this.prisma.jobEventArchive.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: offset,
+        take: limit
+      }),
+      this.prisma.jobEventArchive.count({ where })
+    ]);
+
+    return {
+      items: items.map((item) => ({
+        id: item.id,
+        sourceJobEventId: item.sourceJobEventId,
+        jobId: item.jobId,
+        jobType: item.jobType,
+        jobStatus: item.jobStatus,
+        correlationId: item.correlationId,
+        type: item.type,
+        level: item.level,
+        message: item.message,
+        metadata: (item.metadata as Record<string, unknown> | null) ?? null,
+        createdAt: item.createdAt.toISOString(),
+        archivedAt: item.archivedAt.toISOString()
+      })),
+      total,
+      limit,
+      offset
+    };
   }
 
   async requestCancel(actor: SessionUser, jobId: string): Promise<JobPublic> {
@@ -826,4 +939,17 @@ function sanitizeJobMetadata(input: unknown): unknown {
   }
 
   return String(input);
+}
+
+function parseIsoDate(value?: string): Date | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return undefined;
+  }
+
+  return parsed;
 }

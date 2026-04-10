@@ -27,6 +27,9 @@ export interface RetentionPolicy {
   uploadSessionDays: number;
   archiveEnabled: boolean;
   archiveBatchSize: number;
+  archiveAuditLogDays: number;
+  archiveSecurityAuditDays: number;
+  archiveJobEventDays: number;
 }
 
 export interface RetentionCleanupSummary {
@@ -39,6 +42,9 @@ export interface RetentionCleanupSummary {
     auditLogsBefore: string;
     securityAuditBefore: string;
     uploadSessionsBefore: string;
+    archiveJobEventsBefore: string;
+    archiveAuditLogsBefore: string;
+    archiveSecurityAuditBefore: string;
   };
   archived: {
     jobEventsCompletedCanceled: number;
@@ -55,6 +61,11 @@ export interface RetentionCleanupSummary {
     jobsFailed: number;
     uploadSessions: number;
   };
+  archivePurged: {
+    jobEvents: number;
+    auditLogsGeneral: number;
+    auditLogsSecurity: number;
+  };
 }
 
 export interface RetentionLastRunState {
@@ -66,6 +77,7 @@ export interface RetentionLastRunState {
   error: string | null;
   archived: Record<string, number>;
   deleted: Record<string, number>;
+  archivePurged: Record<string, number>;
 }
 
 export interface ArchiveStats {
@@ -73,6 +85,11 @@ export interface ArchiveStats {
   auditLogArchiveCount: number;
   jobEventArchiveCount: number;
   lastArchivedAt: string | null;
+  policy: {
+    archiveAuditLogDays: number;
+    archiveSecurityAuditDays: number;
+    archiveJobEventDays: number;
+  };
 }
 
 @Injectable()
@@ -94,7 +111,10 @@ export class JobRetentionService {
       securityAuditDays: this.configService.get<number>("RETENTION_SECURITY_AUDIT_DAYS", 365),
       uploadSessionDays: this.configService.get<number>("RETENTION_UPLOAD_SESSION_DAYS", 30),
       archiveEnabled: this.configService.get<boolean>("RETENTION_ARCHIVE_ENABLED", false),
-      archiveBatchSize: this.configService.get<number>("RETENTION_ARCHIVE_BATCH_SIZE", 500)
+      archiveBatchSize: this.configService.get<number>("RETENTION_ARCHIVE_BATCH_SIZE", 500),
+      archiveAuditLogDays: this.configService.get<number>("ARCHIVE_RETENTION_AUDIT_LOG_DAYS", 730),
+      archiveSecurityAuditDays: this.configService.get<number>("ARCHIVE_RETENTION_SECURITY_AUDIT_DAYS", 1460),
+      archiveJobEventDays: this.configService.get<number>("ARCHIVE_RETENTION_JOB_EVENT_DAYS", 365)
     };
   }
 
@@ -108,6 +128,9 @@ export class JobRetentionService {
     const auditLogsBefore = new Date(now - policy.auditLogDays * 24 * 60 * 60 * 1000);
     const securityAuditBefore = new Date(now - policy.securityAuditDays * 24 * 60 * 60 * 1000);
     const uploadSessionsBefore = new Date(now - policy.uploadSessionDays * 24 * 60 * 60 * 1000);
+    const archiveJobEventsBefore = new Date(now - policy.archiveJobEventDays * 24 * 60 * 60 * 1000);
+    const archiveAuditLogsBefore = new Date(now - policy.archiveAuditLogDays * 24 * 60 * 60 * 1000);
+    const archiveSecurityAuditBefore = new Date(now - policy.archiveSecurityAuditDays * 24 * 60 * 60 * 1000);
 
     const securityActionWhere: Prisma.AuditLogWhereInput[] = SECURITY_AUDIT_ACTION_PREFIXES.map((prefix) => ({
       action: {
@@ -126,7 +149,10 @@ export class JobRetentionService {
         terminalJobsBefore: terminalJobsBefore.toISOString(),
         auditLogsBefore: auditLogsBefore.toISOString(),
         securityAuditBefore: securityAuditBefore.toISOString(),
-        uploadSessionsBefore: uploadSessionsBefore.toISOString()
+        uploadSessionsBefore: uploadSessionsBefore.toISOString(),
+        archiveJobEventsBefore: archiveJobEventsBefore.toISOString(),
+        archiveAuditLogsBefore: archiveAuditLogsBefore.toISOString(),
+        archiveSecurityAuditBefore: archiveSecurityAuditBefore.toISOString()
       },
       archived: {
         jobEventsCompletedCanceled: 0,
@@ -142,6 +168,11 @@ export class JobRetentionService {
         jobsCompletedCanceled: 0,
         jobsFailed: 0,
         uploadSessions: 0
+      },
+      archivePurged: {
+        jobEvents: 0,
+        auditLogsGeneral: 0,
+        auditLogsSecurity: 0
       }
     };
 
@@ -217,6 +248,15 @@ export class JobRetentionService {
       });
       summary.deleted.uploadSessions = uploadSessions.count;
 
+      const archivePurge = await this.applyArchiveGovernance({
+        archiveJobEventsBefore,
+        archiveAuditLogsBefore,
+        archiveSecurityAuditBefore
+      });
+      summary.archivePurged.jobEvents = archivePurge.jobEvents;
+      summary.archivePurged.auditLogsGeneral = archivePurge.auditLogsGeneral;
+      summary.archivePurged.auditLogsSecurity = archivePurge.auditLogsSecurity;
+
       this.metricsService.recordRetentionCleanup("success");
       this.metricsService.recordRetentionDeleted("job_events", summary.deleted.jobEventsCompletedCanceled + summary.deleted.jobEventsFailed);
       this.metricsService.recordRetentionDeleted("audit_logs", summary.deleted.auditLogsGeneral + summary.deleted.auditLogsSecurity);
@@ -224,6 +264,11 @@ export class JobRetentionService {
       this.metricsService.recordRetentionDeleted("upload_sessions", summary.deleted.uploadSessions);
       this.metricsService.recordRetentionArchived("job_events", summary.archived.jobEventsCompletedCanceled + summary.archived.jobEventsFailed);
       this.metricsService.recordRetentionArchived("audit_logs", summary.archived.auditLogsGeneral + summary.archived.auditLogsSecurity);
+      this.metricsService.recordArchiveGovernanceDeleted("job_events_archive", summary.archivePurged.jobEvents);
+      this.metricsService.recordArchiveGovernanceDeleted(
+        "audit_logs_archive",
+        summary.archivePurged.auditLogsGeneral + summary.archivePurged.auditLogsSecurity
+      );
 
       await this.setLastRunState({
         ranAt: new Date().toISOString(),
@@ -233,7 +278,8 @@ export class JobRetentionService {
         jobId: input?.jobId ?? null,
         error: null,
         archived: summary.archived,
-        deleted: summary.deleted
+        deleted: summary.deleted,
+        archivePurged: summary.archivePurged
       });
 
       return summary;
@@ -267,7 +313,8 @@ export class JobRetentionService {
       jobId: readString(value.jobId),
       error: readString(value.error),
       archived: readNumberRecord(value.archived),
-      deleted: readNumberRecord(value.deleted)
+      deleted: readNumberRecord(value.deleted),
+      archivePurged: readNumberRecord(value.archivePurged)
     };
   }
 
@@ -284,7 +331,8 @@ export class JobRetentionService {
         jobId: input?.jobId ?? null,
         error: errorMessage.slice(0, 2000),
         archived: {},
-        deleted: {}
+        deleted: {},
+        archivePurged: {}
       });
     } catch (error) {
       this.logger.warn(`Failed to record retention last-run failure state: ${(error as Error).message}`);
@@ -292,7 +340,8 @@ export class JobRetentionService {
   }
 
   async getArchiveStats(): Promise<ArchiveStats> {
-    const enabled = this.getPolicy().archiveEnabled;
+    const policy = this.getPolicy();
+    const enabled = policy.archiveEnabled;
 
     const [auditLogArchiveCount, jobEventArchiveCount, latestAudit, latestEvent] = await Promise.all([
       this.prisma.auditLogArchive.count(),
@@ -316,7 +365,60 @@ export class JobRetentionService {
       enabled,
       auditLogArchiveCount,
       jobEventArchiveCount,
-      lastArchivedAt
+      lastArchivedAt,
+      policy: {
+        archiveAuditLogDays: policy.archiveAuditLogDays,
+        archiveSecurityAuditDays: policy.archiveSecurityAuditDays,
+        archiveJobEventDays: policy.archiveJobEventDays
+      }
+    };
+  }
+
+  private async applyArchiveGovernance(input: {
+    archiveJobEventsBefore: Date;
+    archiveAuditLogsBefore: Date;
+    archiveSecurityAuditBefore: Date;
+  }): Promise<{
+    jobEvents: number;
+    auditLogsGeneral: number;
+    auditLogsSecurity: number;
+  }> {
+    const archiveSecurityActionWhere: Prisma.AuditLogArchiveWhereInput[] = SECURITY_AUDIT_ACTION_PREFIXES.map((prefix) => ({
+      action: {
+        startsWith: prefix
+      }
+    }));
+
+    const [jobEvents, auditLogsGeneral, auditLogsSecurity] = await Promise.all([
+      this.prisma.jobEventArchive.deleteMany({
+        where: {
+          createdAt: {
+            lt: input.archiveJobEventsBefore
+          }
+        }
+      }),
+      this.prisma.auditLogArchive.deleteMany({
+        where: {
+          createdAt: {
+            lt: input.archiveAuditLogsBefore
+          },
+          NOT: archiveSecurityActionWhere
+        }
+      }),
+      this.prisma.auditLogArchive.deleteMany({
+        where: {
+          createdAt: {
+            lt: input.archiveSecurityAuditBefore
+          },
+          OR: archiveSecurityActionWhere
+        }
+      })
+    ]);
+
+    return {
+      jobEvents: jobEvents.count,
+      auditLogsGeneral: auditLogsGeneral.count,
+      auditLogsSecurity: auditLogsSecurity.count
     };
   }
 
@@ -406,6 +508,7 @@ export class JobRetentionService {
           data: rows.map((row) => ({
             sourceAuditLogId: row.id,
             actorUserId: row.actorUserId,
+            correlationId: extractCorrelationIdFromAuditMetadata(row.metadata),
             action: row.action,
             entityType: row.entityType,
             entityId: row.entityId,
@@ -489,4 +592,18 @@ function toArchiveJsonValue(
   }
 
   return value as Prisma.InputJsonValue;
+}
+
+function extractCorrelationIdFromAuditMetadata(value: Prisma.JsonValue | null): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const context = (value as Record<string, unknown>)["_context"];
+  if (!context || typeof context !== "object" || Array.isArray(context)) {
+    return null;
+  }
+
+  const correlationId = (context as Record<string, unknown>)["correlationId"];
+  return typeof correlationId === "string" && correlationId.length > 0 ? correlationId : null;
 }

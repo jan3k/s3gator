@@ -27,7 +27,9 @@
     "integration:test": "bash ./scripts/integration-test.sh",
     "integration:reliability": "bash ./scripts/integration-reliability.sh",
     "integration:reliability:v2": "bash ./scripts/integration-reliability-v2.sh",
-    "integration:down": "docker compose -f docker-compose.integration.yml down -v"
+    "integration:down": "docker compose -f docker-compose.integration.yml down -v",
+    "integration:reliability:ci": "bash ./scripts/integration-reliability-ci.sh",
+    "ops:validate-assets": "node ./scripts/validate-ops-assets.mjs"
   },
   "devDependencies": {
     "@typescript-eslint/parser": "8.58.1",
