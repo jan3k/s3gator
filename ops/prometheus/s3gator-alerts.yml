@@ -1,0 +1,92 @@
+groups:
+  - name: s3gator-stage6-alerts
+    rules:
+      - alert: S3GatorHighLoginFailureRate
+        expr: sum(rate(s3gator_login_total{result="failure"}[10m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High login failure rate"
+          description: "Login failures exceed 0.5 req/s for 10 minutes."
+
+      - alert: S3GatorJobFailureRateHigh
+        expr: sum(rate(s3gator_jobs_total{status="fail"}[10m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Background job failure rate is high"
+          description: "Job failures exceed 0.2 req/s for 10 minutes."
+
+      - alert: S3GatorRetryExhaustedBurst
+        expr: sum(rate(s3gator_job_retries_total{event="exhausted"}[10m])) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Job retries are being exhausted"
+          description: "Retry exhaustion indicates persistent job failures."
+
+      - alert: S3GatorJobReclaimSpike
+        expr: sum(rate(s3gator_job_reclaims_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Increased stale job reclaim activity"
+          description: "Workers are reclaiming stale running jobs more frequently."
+
+      - alert: S3GatorUploadFailureRateHigh
+        expr: sum(rate(s3gator_upload_events_total{event="fail"}[10m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Upload failure rate is high"
+          description: "Upload failures exceed expected baseline."
+
+      - alert: S3GatorS3FailureRateHigh
+        expr: sum(rate(s3gator_s3_failures_total[10m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "S3 operation failure rate is high"
+          description: "S3-compatible operations are failing more than expected."
+
+      - alert: S3GatorLdapFailureRateHigh
+        expr: sum(rate(s3gator_ldap_auth_failures_total[10m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LDAP auth failures are high"
+          description: "LDAP authentication failures exceed threshold."
+
+      - alert: S3GatorRetentionCleanupFailures
+        expr: sum(rate(s3gator_retention_cleanup_total{result="failure"}[30m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Retention cleanup is failing"
+          description: "Retention cleanup has reported failures in the last 30 minutes."
+
+      - alert: S3GatorSchedulerTaskFailures
+        expr: sum(rate(s3gator_scheduler_runs_total{result="failed"}[30m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Maintenance scheduler task failed"
+          description: "At least one scheduled maintenance task failed recently."
+
+      - alert: S3GatorApiDown
+        expr: up{job="s3gator-api"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "S3Gator API target is down"
+          description: "Prometheus cannot scrape the API target."

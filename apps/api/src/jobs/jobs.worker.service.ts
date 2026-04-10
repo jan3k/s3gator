@@ -45,6 +45,7 @@ const folderDeletePayloadSchema = z.object({
 
 const bucketSyncPayloadSchema = z.object({
   actor: actorSchema,
+  reason: z.enum(["manual", "scheduled"]).default("manual"),
   ipAddress: z.string().optional(),
   correlationId: z.string().optional()
 });
@@ -413,7 +414,8 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
       type: "bucket_sync.started",
       message: "Bucket sync started.",
       metadata: {
-        actorUserId: actor.id
+        actorUserId: actor.id,
+        reason: payload.reason
       }
     });
 
@@ -484,7 +486,8 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
       message: "Bucket sync step completed.",
       metadata: {
         synced: remoteBuckets.length,
-        connectionId: conn.id
+        connectionId: conn.id,
+        reason: payload.reason
       }
     });
 
@@ -497,7 +500,8 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
         jobId: job.id,
         correlationId,
         synced: remoteBuckets.length,
-        connectionId: conn.id
+        connectionId: conn.id,
+        reason: payload.reason
       },
       ipAddress: payload.ipAddress
     });
@@ -505,6 +509,7 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
     return {
       synced: remoteBuckets.length,
       connectionId: conn.id,
+      reason: payload.reason,
       mode: "job"
     };
   }
@@ -636,7 +641,10 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
 
     await this.throwIfCancelRequested(job.id, "before_retention_cleanup");
 
-    const summary = await this.retentionService.runCleanup();
+    const summary = await this.retentionService.runCleanup({
+      reason: payload.reason,
+      jobId: job.id
+    });
 
     await this.throwIfCancelRequested(job.id, "after_retention_cleanup");
 
@@ -644,6 +652,8 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
       job.id,
       {
         metadata: {
+          mode: summary.mode,
+          archived: summary.archived,
           deleted: summary.deleted,
           thresholds: summary.thresholds
         }
@@ -659,6 +669,8 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
       message: "Retention cleanup completed.",
       metadata: {
         reason: payload.reason,
+        mode: summary.mode,
+        archived: summary.archived,
         deleted: summary.deleted
       }
     });
@@ -673,6 +685,8 @@ export class JobsWorkerService implements OnModuleInit, OnModuleDestroy {
         jobId: job.id,
         correlationId,
         reason: payload.reason,
+        retentionMode: summary.mode,
+        archived: summary.archived,
         deleted: summary.deleted
       }
     });

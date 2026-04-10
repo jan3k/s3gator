@@ -1,6 +1,6 @@
-# Architecture: Stage 5 (Retention, Retry, Reliability)
+# Architecture: Stage 6 (Archival, Scheduler, Multi-Worker Reliability)
 
-Date: 2026-04-09
+Date: 2026-04-10
 
 ## Monorepo
 
@@ -86,21 +86,50 @@ This is intentionally eventful but bounded; events are meaningful operator diagn
   - retryable failures move back to `QUEUED` with `nextRetryAt`,
   - destructive job failures are terminal without retry.
 
-## Operational Retention
+## Operational Retention and Archive Tier
 
-Stage 5 adds retention maintenance for operational tables:
+Stage 6 retention maintenance covers:
 
 - `job_events` (different windows for completed/canceled vs failed jobs)
 - `audit_logs` (general vs security-relevant windows)
 - old terminal jobs
 - old terminal upload sessions
 
-Current strategy is hard-delete retention windows (no archive table tier).
+Retention execution modes:
+
+1. `hard_delete` (default): Stage 5 behavior
+2. `archive_and_prune` (optional):
+   - old `audit_logs` rows are copied to `AuditLogArchive` before pruning hot table rows
+   - old `job_events` rows are copied to `JobEventArchive` before pruning hot table rows
+
+Hot-path operational queries continue to read primary tables; archive tables are for diagnostics and longer-lived operational history.
 
 Retention is executable via:
 
 - queued maintenance job (`RETENTION_CLEANUP`),
 - direct maintenance command (`pnpm maintenance:retention`).
+
+## Scheduled Maintenance
+
+Stage 6 introduces a lightweight in-process scheduler with distributed coordination:
+
+- scheduler tick loop is env-gated (`MAINTENANCE_SCHEDULER_ENABLED`)
+- single-leader behavior is enforced with Redis lock (`maintenance:scheduler:tick`)
+- scheduled tasks enqueue through the same jobs pipeline (not a separate orchestrator)
+
+Scheduled task set:
+
+- `RETENTION_CLEANUP`
+- `UPLOAD_CLEANUP`
+- `BUCKET_SYNC` (optional, interval can be `0` to disable)
+
+Scheduler writes per-task run state (`maintenance.scheduler.task.*`) and exposes it through maintenance status API/UI:
+
+- last run,
+- next run,
+- result (`queued`, `skipped_active`, `failed`),
+- linked job ID (if queued),
+- last error.
 
 ## Multipart Upload Durability
 
@@ -133,11 +162,13 @@ Redis can be disabled in local-only paths, but production should keep it enabled
 
 - `GET /metrics` (Prometheus)
 - includes login, upload, job, S3 failure, LDAP failure metrics
-- Stage 5 adds retry/reclaim/retention metric families:
+- Stage 6 metrics include retry/reclaim/retention/scheduler families:
   - `s3gator_job_retries_total`
   - `s3gator_job_reclaims_total`
   - `s3gator_retention_cleanup_total`
   - `s3gator_retention_deleted_records_total`
+  - `s3gator_retention_archived_records_total`
+  - `s3gator_scheduler_runs_total`
 
 ## Health
 
@@ -169,17 +200,25 @@ Redis can be disabled in local-only paths, but production should keep it enabled
 
 Bootstrap script (`scripts/integration-bootstrap.mjs`) makes integration deterministic by initializing Garage layout/key/bucket/alias, verifying app connectivity, and running bucket sync.
 
-Stage 5 reliability lane (`integration:reliability`) adds real restart/reclaim validation:
+Reliability lanes:
 
-1. queue long-running rename job,
-2. interrupt worker container,
-3. wait lock expiry,
-4. restart worker,
-5. verify reclaim + single terminal completion via timeline/API.
+- `integration:reliability` (Stage 5 baseline):
+  1. queue long-running rename job,
+  2. interrupt worker container,
+  3. wait lock expiry,
+  4. restart worker,
+  5. verify reclaim + single terminal completion.
+
+- `integration:reliability:v2` (Stage 6):
+  1. run baseline reclaim scenario,
+  2. run retryable `BUCKET_SYNC` failure/retry scenario,
+  3. inject worker restart during retry lifecycle,
+  4. force multi-worker contention (secondary worker),
+  5. assert coherent timeline and no duplicate terminal event.
 
 ## Honest Boundaries
 
 - No ACL/policy/versioning abstraction is introduced (Garage constraints respected).
 - Rename/delete durability is job-level, not per-object checkpoint resume.
 - Job cancellation remains best-effort for in-flight long operations.
-- Retention currently uses hard delete windows rather than archive-table tiering.
+- Archive mode is optional; default deployments can remain hard-delete only.

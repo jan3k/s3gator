@@ -162,6 +162,13 @@ describe("JobsWorkerService", () => {
     });
     jobsService.isCancelRequested.mockResolvedValue(false);
     retentionService.runCleanup.mockResolvedValue({
+      mode: "hard_delete",
+      archived: {
+        jobEventsCompletedCanceled: 0,
+        jobEventsFailed: 0,
+        auditLogsGeneral: 0,
+        auditLogsSecurity: 0
+      },
       deleted: {
         jobEventsCompletedCanceled: 1,
         jobEventsFailed: 1,
@@ -175,7 +182,10 @@ describe("JobsWorkerService", () => {
 
     await service.runOnce();
 
-    expect(retentionService.runCleanup).toHaveBeenCalledTimes(1);
+    expect(retentionService.runCleanup).toHaveBeenCalledWith({
+      reason: "manual",
+      jobId: "job-ret-1"
+    });
     expect(jobsService.recordEvent).toHaveBeenCalledWith(
       "job-ret-1",
       expect.objectContaining({ type: "retention_cleanup.started" })

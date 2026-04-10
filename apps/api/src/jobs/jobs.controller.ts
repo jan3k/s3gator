@@ -6,6 +6,7 @@ import { RoleGuard } from "@/authorization/role.guard.js";
 import { RequireRoles } from "@/authorization/role.decorator.js";
 import { JobsService } from "./jobs.service.js";
 import { JobRetentionService } from "./job-retention.service.js";
+import { MaintenanceSchedulerService } from "./maintenance-scheduler.service.js";
 
 const listSchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
@@ -20,7 +21,8 @@ const eventsQuerySchema = z.object({
 export class JobsController {
   constructor(
     private readonly jobsService: JobsService,
-    private readonly retentionService: JobRetentionService
+    private readonly retentionService: JobRetentionService,
+    private readonly schedulerService: MaintenanceSchedulerService
   ) {}
 
   @Get()
@@ -102,6 +104,24 @@ export class JobsController {
   @RequireRoles("SUPER_ADMIN", "ADMIN")
   retentionPolicy() {
     return this.retentionService.getPolicy();
+  }
+
+  @Get("maintenance/status")
+  @UseGuards(RoleGuard)
+  @RequireRoles("SUPER_ADMIN", "ADMIN")
+  async maintenanceStatus() {
+    const [lastRetentionRun, archive, scheduler] = await Promise.all([
+      this.retentionService.getLastRunState(),
+      this.retentionService.getArchiveStats(),
+      this.schedulerService.getStatus()
+    ]);
+
+    return {
+      retentionPolicy: this.retentionService.getPolicy(),
+      retentionLastRun: lastRetentionRun,
+      archive,
+      scheduler
+    };
   }
 
   @Post("maintenance/retention-cleanup")

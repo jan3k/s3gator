@@ -1,0 +1,103 @@
+Date : 2026-04-09 22:20:59
+Directory : /home/jaugustyniak/Documents/repos/github/s3gator
+Total : 44 files,  3261 codes, 2 comments, 680 blanks, all 3943 lines
+
+Languages
++----------------+------------+------------+------------+------------+------------+
+| language       | files      | code       | comment    | blank      | total      |
++----------------+------------+------------+------------+------------+------------+
+| YAML           |          2 |      1,566 |          0 |        351 |      1,917 |
+| TypeScript     |         25 |      1,206 |          0 |        144 |      1,350 |
+| Markdown       |         11 |        394 |          0 |        173 |        567 |
+| TypeScript JSX |          1 |         52 |          0 |          2 |         54 |
+| MS SQL         |          1 |         19 |          0 |          3 |         22 |
+| JavaScript     |          1 |         11 |          1 |          2 |         14 |
+| Shell Script   |          1 |          8 |          1 |          5 |         14 |
+| JSON           |          2 |          5 |          0 |          0 |          5 |
++----------------+------------+------------+------------+------------+------------+
+
+Directories
++----------------------------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                                                                             | files      | code       | comment    | blank      | total      |
++----------------------------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                                                                                |         44 |      3,261 |          2 |        680 |      3,943 |
+| . (Files)                                                                                                                        |          4 |      1,567 |          0 |        354 |      1,921 |
+| apps                                                                                                                             |         26 |      1,264 |          0 |        148 |      1,412 |
+| apps/api                                                                                                                         |         25 |      1,212 |          0 |        146 |      1,358 |
+| apps/api (Files)                                                                                                                 |          1 |          3 |          0 |          0 |          3 |
+| apps/api/prisma                                                                                                                  |          1 |         19 |          0 |          3 |         22 |
+| apps/api/prisma/migrations                                                                                                       |          1 |         19 |          0 |          3 |         22 |
+| apps/api/prisma/migrations/20260409220000_stage5_retention_retry                                                                 |          1 |         19 |          0 |          3 |         22 |
+| apps/api/src                                                                                                                     |         23 |      1,190 |          0 |        143 |      1,333 |
+| apps/api/src/audit                                                                                                               |          2 |         50 |          0 |          3 |         53 |
+| apps/api/src/auth                                                                                                                |          1 |         38 |          0 |          2 |         40 |
+| apps/api/src/authorization                                                                                                       |          1 |          1 |          0 |          0 |          1 |
+| apps/api/src/buckets                                                                                                             |          1 |          2 |          0 |          0 |          2 |
+| apps/api/src/common                                                                                                              |          4 |         45 |          0 |          6 |         51 |
+| apps/api/src/files                                                                                                               |          1 |          4 |          0 |          0 |          4 |
+| apps/api/src/health                                                                                                              |          1 |          2 |          0 |          0 |          2 |
+| apps/api/src/jobs                                                                                                                |          8 |        753 |          0 |         80 |        833 |
+| apps/api/src/maintenance                                                                                                         |          2 |        239 |          0 |         44 |        283 |
+| apps/api/src/metrics                                                                                                             |          2 |         56 |          0 |          8 |         64 |
+| apps/web                                                                                                                         |          1 |         52 |          0 |          2 |         54 |
+| apps/web/app                                                                                                                     |          1 |         52 |          0 |          2 |         54 |
+| apps/web/app/admin                                                                                                               |          1 |         52 |          0 |          2 |         54 |
+| docs                                                                                                                             |         10 |        395 |          0 |        170 |        565 |
+| packages                                                                                                                         |          1 |          5 |          0 |          0 |          5 |
+| packages/shared                                                                                                                  |          1 |          5 |          0 |          0 |          5 |
+| packages/shared/src                                                                                                              |          1 |          5 |          0 |          0 |          5 |
+| scripts                                                                                                                          |          2 |         19 |          2 |          7 |         28 |
+| test                                                                                                                             |          1 |         11 |          0 |          1 |         12 |
+| test/e2e-integration                                                                                                             |          1 |         11 |          0 |          1 |         12 |
++----------------------------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++----------------------------------------------------------------------------------------------------------------------------------+----------------+------------+------------+------------+------------+
+| filename                                                                                                                         | language       | code       | comment    | blank      | total      |
++----------------------------------------------------------------------------------------------------------------------------------+----------------+------------+------------+------------+------------+
+| /home/jaugustyniak/Documents/repos/github/s3gator/README.md                                                                      | Markdown       |         -1 |          0 |          3 |          2 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/package.json                                                          | JSON           |          3 |          0 |          0 |          3 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/prisma/migrations/20260409220000_stage5_retention_retry/migration.sql | MS SQL         |         19 |          0 |          3 |         22 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/audit/audit.controller.ts                                         | TypeScript     |          7 |          0 |          1 |          8 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/audit/audit.service.ts                                            | TypeScript     |         43 |          0 |          2 |         45 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/auth/auth.service.ts                                              | TypeScript     |         38 |          0 |          2 |         40 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/authorization/authorization.module.ts                             | TypeScript     |          1 |          0 |          0 |          1 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/buckets/buckets.module.ts                                         | TypeScript     |          2 |          0 |          0 |          2 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/common/common.module.ts                                           | TypeScript     |          8 |          0 |          2 |         10 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/common/crypto.service.ts                                          | TypeScript     |          3 |          0 |          0 |          3 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/common/env.ts                                                     | TypeScript     |         13 |          0 |          0 |         13 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/common/request-context.test.ts                                    | TypeScript     |         21 |          0 |          4 |         25 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/files/files.module.ts                                             | TypeScript     |          4 |          0 |          0 |          4 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/health/health.module.ts                                           | TypeScript     |          2 |          0 |          0 |          2 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/jobs/job-retention.service.test.ts                                | TypeScript     |         69 |          0 |         13 |         82 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/jobs/job-retention.service.ts                                     | TypeScript     |        155 |          0 |         19 |        174 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/jobs/jobs.controller.ts                                           | TypeScript     |         26 |          0 |          3 |         29 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/jobs/jobs.module.ts                                               | TypeScript     |          1 |          0 |          0 |          1 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/jobs/jobs.service.test.ts                                         | TypeScript     |        217 |          0 |         16 |        233 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/jobs/jobs.service.ts                                              | TypeScript     |        169 |          0 |         15 |        184 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/jobs/jobs.worker.service.test.ts                                  | TypeScript     |         55 |          0 |          4 |         59 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/jobs/jobs.worker.service.ts                                       | TypeScript     |         61 |          0 |         10 |         71 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/maintenance/reliability-check.ts                                  | TypeScript     |        222 |          0 |         40 |        262 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/maintenance/run-retention.ts                                      | TypeScript     |         17 |          0 |          4 |         21 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/metrics/metrics.service.test.ts                                   | TypeScript     |         13 |          0 |          0 |         13 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/api/src/metrics/metrics.service.ts                                        | TypeScript     |         43 |          0 |          8 |         51 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/apps/web/app/admin/page.tsx                                                    | TypeScript JSX |         52 |          0 |          2 |         54 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docker-compose.integration.yml                                                 | YAML           |         26 |          0 |         -1 |         25 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/architecture.md                                                           | Markdown       |         47 |          0 |         10 |         57 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/data-retention.md                                                         | Markdown       |         31 |          0 |         16 |         47 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/garage-bootstrap.md                                                       | Markdown       |         40 |          0 |         20 |         60 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/integration-testing.md                                                    | Markdown       |         50 |          0 |         21 |         71 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/operations.md                                                             | Markdown       |         31 |          0 |         12 |         43 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/reliability.md                                                            | Markdown       |         28 |          0 |         14 |         42 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/security.md                                                               | Markdown       |        -26 |          0 |         -3 |        -29 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/slo-sli.md                                                                | Markdown       |         64 |          0 |         24 |         88 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/stage5-plan.md                                                            | Markdown       |         98 |          0 |         39 |        137 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/docs/telemetry.md                                                              | Markdown       |         32 |          0 |         17 |         49 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/package.json                                                                   | JSON           |          2 |          0 |          0 |          2 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/packages/shared/src/types.ts                                                   | TypeScript     |          5 |          0 |          0 |          5 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/pnpm-lock.yaml                                                                 | YAML           |      1,540 |          0 |        352 |      1,892 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/scripts/integration-bootstrap.mjs                                              | JavaScript     |         11 |          1 |          2 |         14 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/scripts/integration-reliability.sh                                             | Shell Script   |          8 |          1 |          5 |         14 |
+| /home/jaugustyniak/Documents/repos/github/s3gator/test/e2e-integration/stack.spec.ts                                             | TypeScript     |         11 |          0 |          1 |         12 |
+| Total                                                                                                                            |                |      3,261 |          2 |        680 |      3,943 |
++----------------------------------------------------------------------------------------------------------------------------------+----------------+------------+------------+------------+------------+

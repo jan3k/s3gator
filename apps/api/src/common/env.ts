@@ -46,6 +46,20 @@ const envSchema = z.object({
   RETENTION_AUDIT_LOG_DAYS: z.coerce.number().int().min(1).max(3650).default(180),
   RETENTION_SECURITY_AUDIT_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
   RETENTION_UPLOAD_SESSION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+  RETENTION_ARCHIVE_ENABLED: z
+    .union([z.boolean(), z.string()])
+    .transform((value) => (typeof value === "boolean" ? value : value === "true"))
+    .default(false),
+  RETENTION_ARCHIVE_BATCH_SIZE: z.coerce.number().int().min(10).max(5000).default(500),
+  MAINTENANCE_SCHEDULER_ENABLED: z
+    .union([z.boolean(), z.string()])
+    .transform((value) => (typeof value === "boolean" ? value : value === "true"))
+    .default(false),
+  MAINTENANCE_SCHEDULER_TICK_SECONDS: z.coerce.number().int().min(5).max(3600).default(30),
+  MAINTENANCE_SCHEDULER_LOCK_TTL_SECONDS: z.coerce.number().int().min(5).max(3600).default(60),
+  MAINTENANCE_RETENTION_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(10_080).default(360),
+  MAINTENANCE_UPLOAD_CLEANUP_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(10_080).default(30),
+  MAINTENANCE_BUCKET_SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(10_080).default(0),
   GARAGE_ENDPOINT: z.string().url().optional(),
   GARAGE_REGION: z.string().default("garage"),
   GARAGE_FORCE_PATH_STYLE: z

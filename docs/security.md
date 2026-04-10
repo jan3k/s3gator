@@ -1,6 +1,6 @@
 # Security Model
 
-Date: 2026-04-09
+Date: 2026-04-10
 
 ## Core Guarantees
 
@@ -62,6 +62,12 @@ Stage 5 adds:
 - retained/cleanup operational lifecycle controls for `job_events` and `audit_logs`,
 - longer retention window for security-relevant audit actions vs general audit noise.
 
+Stage 6 extends this with:
+
+- optional archive tier for `audit_logs` and `job_events` (`*_archive` tables),
+- scheduler-driven maintenance with explicit task result state (`queued`, `skipped_active`, `failed`),
+- maintenance status visibility in admin/API without exposing secrets.
+
 ## Correlation IDs and Telemetry Security
 
 - API assigns/propagates request correlation IDs (`x-request-id` by default).
@@ -79,4 +85,4 @@ Stage 5 adds:
 - Fine-grained object-level ABAC beyond bucket capabilities is not implemented.
 - Job cancellation is best-effort when underlying S3 calls are already in-flight.
 - Full SIEM export pipeline is out of scope by default (logs/metrics/traces hooks are available).
-- Retention currently uses hard-delete windows (no archival table tier), so operators should export logs/events externally when longer-term retention is required.
+- Archive mode is optional and disabled by default; if disabled, retention remains hard-delete and operators should export externally for longer compliance windows.

@@ -5,12 +5,13 @@ import { JobsController } from "./jobs.controller.js";
 import { JobsService } from "./jobs.service.js";
 import { JobsWorkerService } from "./jobs.worker.service.js";
 import { JobRetentionService } from "./job-retention.service.js";
+import { MaintenanceSchedulerService } from "./maintenance-scheduler.service.js";
 
 @Global()
 @Module({
   imports: [AuditModule, ConnectionsModule],
   controllers: [JobsController],
-  providers: [JobsService, JobsWorkerService, JobRetentionService],
-  exports: [JobsService, JobsWorkerService, JobRetentionService]
+  providers: [JobsService, JobsWorkerService, JobRetentionService, MaintenanceSchedulerService],
+  exports: [JobsService, JobsWorkerService, JobRetentionService, MaintenanceSchedulerService]
 })
 export class JobsModule {}

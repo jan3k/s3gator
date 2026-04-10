@@ -213,6 +213,23 @@ model AuditLog {
   createdAt  DateTime @default(now())
 }
 
+model AuditLogArchive {
+  id               String   @id @default(cuid())
+  sourceAuditLogId String?  @unique
+  actorUserId      String?
+  action           String
+  entityType       String
+  entityId         String?
+  metadata         Json?
+  ipAddress        String?
+  createdAt        DateTime
+  archivedAt       DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([archivedAt])
+  @@index([action, createdAt])
+}
+
 model UploadSession {
   id          String              @id @default(cuid())
   userId      String
@@ -282,5 +299,25 @@ model JobEvent {
 
   @@index([jobId, createdAt])
   @@index([type, createdAt])
+  @@index([correlationId, createdAt])
+}
+
+model JobEventArchive {
+  id               String        @id @default(cuid())
+  sourceJobEventId String?       @unique
+  jobId            String
+  jobType          JobType?
+  jobStatus        JobStatus?
+  correlationId    String?
+  type             String
+  level            JobEventLevel
+  message          String
+  metadata         Json?
+  createdAt        DateTime
+  archivedAt       DateTime      @default(now())
+
+  @@index([jobId, createdAt])
+  @@index([type, createdAt])
+  @@index([archivedAt])
   @@index([correlationId, createdAt])
 }

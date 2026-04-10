@@ -1,6 +1,6 @@
 # Telemetry and Correlation IDs
 
-Date: 2026-04-09
+Date: 2026-04-10
 
 ## Correlation IDs
 
@@ -14,6 +14,7 @@ Propagation:
 - persisted jobs (`jobs.correlationId`)
 - persisted job events (`job_events.correlationId`)
 - worker execution context
+- scheduler-enqueued maintenance jobs/events
 
 ## OpenTelemetry
 

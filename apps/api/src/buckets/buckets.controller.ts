@@ -56,6 +56,7 @@ export class BucketsController {
 
     return this.jobsService.enqueueBucketSync({
       actor,
+      reason: "manual",
       ipAddress,
       correlationId: req.correlationId
     });

@@ -1,6 +1,6 @@
 # Integration Testing Lane
 
-Date: 2026-04-09
+Date: 2026-04-10
 
 ## Test Lanes
 
@@ -32,11 +32,13 @@ Commands:
 npx pnpm integration:up
 npx pnpm integration:test
 npx pnpm integration:reliability
+npx pnpm integration:reliability:v2
 npx pnpm integration:down
 ```
 
 `integration:test` runs bootstrap first and then executes Playwright integration suite (`test/e2e-integration`).
 `integration:reliability` runs bootstrap and then executes worker interruption/reclaim validation (`apps/api/src/maintenance/reliability-check.ts`).
+`integration:reliability:v2` runs baseline reclaim scenario and then retry+restart+contention scenario (`apps/api/src/maintenance/reliability-v2-check.ts`).
 
 ## Integration E2E Coverage
 
@@ -57,6 +59,13 @@ Current scenarios validate:
 3. restart worker after lock TTL window
 4. verify reclaim signal in job timeline
 5. verify single terminal completion event (no duplicate finalization)
+
+`integration:reliability:v2` additionally validates:
+
+1. retryable bucket sync reschedule path
+2. restart during retry lifecycle
+3. multi-worker claim contention
+4. coherent retry timeline and single terminal event invariants
 
 ## Notes
 

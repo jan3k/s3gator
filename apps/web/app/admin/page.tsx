@@ -109,6 +109,43 @@ type RetentionPolicy = {
   auditLogDays: number;
   securityAuditDays: number;
   uploadSessionDays: number;
+  archiveEnabled: boolean;
+  archiveBatchSize: number;
+};
+
+type MaintenanceStatus = {
+  retentionPolicy: RetentionPolicy;
+  retentionLastRun: {
+    ranAt: string;
+    status: "success" | "failure";
+    mode: "hard_delete" | "archive_and_prune";
+    reason: "manual" | "scheduled";
+    jobId: string | null;
+    error: string | null;
+    archived: Record<string, number>;
+    deleted: Record<string, number>;
+  } | null;
+  archive: {
+    enabled: boolean;
+    auditLogArchiveCount: number;
+    jobEventArchiveCount: number;
+    lastArchivedAt: string | null;
+  };
+  scheduler: {
+    enabled: boolean;
+    tickSeconds: number;
+    lockTtlSeconds: number;
+    tasks: Array<{
+      task: "retention_cleanup" | "upload_cleanup" | "bucket_sync";
+      enabled: boolean;
+      intervalMinutes: number;
+      lastRunAt: string | null;
+      nextRunAt: string | null;
+      lastResult: "queued" | "skipped_active" | "failed" | null;
+      lastJobId: string | null;
+      lastError: string | null;
+    }>;
+  };
 };
 
 export default function AdminPage() {
@@ -181,6 +218,12 @@ export default function AdminPage() {
   const retentionPolicyQuery = useQuery({
     queryKey: ["jobs", "retention-policy"],
     queryFn: () => apiFetch<RetentionPolicy>("/jobs/maintenance/retention-policy"),
+    enabled: meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN"
+  });
+  const maintenanceStatusQuery = useQuery({
+    queryKey: ["jobs", "maintenance-status"],
+    queryFn: () => apiFetch<MaintenanceStatus>("/jobs/maintenance/status"),
+    refetchInterval: 15_000,
     enabled: meQuery.data?.user?.role === "SUPER_ADMIN" || meQuery.data?.user?.role === "ADMIN"
   });
 
@@ -274,6 +317,7 @@ export default function AdminPage() {
     onSuccess: () => {
       setStatusMessage("Bucket sync job queued");
       void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
+      void queryClient.invalidateQueries({ queryKey: ["jobs", "maintenance-status"] });
     }
   });
 
@@ -358,6 +402,7 @@ export default function AdminPage() {
     onSuccess: () => {
       setStatusMessage("Upload cleanup job queued");
       void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
+      void queryClient.invalidateQueries({ queryKey: ["jobs", "maintenance-status"] });
     }
   });
 
@@ -366,6 +411,7 @@ export default function AdminPage() {
     onSuccess: () => {
       setStatusMessage("Retention cleanup job queued");
       void queryClient.invalidateQueries({ queryKey: ["jobs", "all"] });
+      void queryClient.invalidateQueries({ queryKey: ["jobs", "maintenance-status"] });
     }
   });
 
@@ -767,8 +813,54 @@ export default function AdminPage() {
           </p>
           {retentionPolicyQuery.data ? (
             <p className="mb-2 text-xs text-slate-500">
-              Retention defaults: job events {retentionPolicyQuery.data.jobEventsDays}d / failed jobs {retentionPolicyQuery.data.failedJobDays}d / audit {retentionPolicyQuery.data.auditLogDays}d.
+              Retention defaults: job events {retentionPolicyQuery.data.jobEventsDays}d / failed jobs {retentionPolicyQuery.data.failedJobDays}d / audit {retentionPolicyQuery.data.auditLogDays}d / mode {retentionPolicyQuery.data.archiveEnabled ? "archive+prune" : "hard delete"}.
             </p>
+          ) : null}
+          {maintenanceStatusQuery.data ? (
+            <div className="mb-3 rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+              <div className="font-medium text-slate-800">Maintenance status</div>
+              <div className="mt-1">Archive enabled: {maintenanceStatusQuery.data.archive.enabled ? "yes" : "no"}</div>
+              <div>Archive counts: audit {maintenanceStatusQuery.data.archive.auditLogArchiveCount} / events {maintenanceStatusQuery.data.archive.jobEventArchiveCount}</div>
+              <div>Last archived at: {maintenanceStatusQuery.data.archive.lastArchivedAt ?? "-"}</div>
+              <div className="mt-1">
+                Last retention run:{" "}
+                {maintenanceStatusQuery.data.retentionLastRun
+                  ? `${maintenanceStatusQuery.data.retentionLastRun.ranAt} (${maintenanceStatusQuery.data.retentionLastRun.status}, ${maintenanceStatusQuery.data.retentionLastRun.reason})`
+                  : "-"}
+              </div>
+              {maintenanceStatusQuery.data.retentionLastRun?.error ? (
+                <div className="text-red-700">Last retention error: {maintenanceStatusQuery.data.retentionLastRun.error}</div>
+              ) : null}
+              <div className="mt-2 font-medium text-slate-800">
+                Scheduler: {maintenanceStatusQuery.data.scheduler.enabled ? "enabled" : "disabled"} (tick {maintenanceStatusQuery.data.scheduler.tickSeconds}s)
+              </div>
+              <div className="mt-1 overflow-auto rounded border border-slate-200 bg-white">
+                <table className="min-w-full text-[11px]">
+                  <thead className="bg-slate-50 text-left uppercase text-slate-500">
+                    <tr>
+                      <th className="px-2 py-1">Task</th>
+                      <th className="px-2 py-1">Interval</th>
+                      <th className="px-2 py-1">Last result</th>
+                      <th className="px-2 py-1">Last run</th>
+                      <th className="px-2 py-1">Next run</th>
+                      <th className="px-2 py-1">Last job</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {maintenanceStatusQuery.data.scheduler.tasks.map((task) => (
+                      <tr key={task.task}>
+                        <td className="px-2 py-1">{task.task}</td>
+                        <td className="px-2 py-1">{task.enabled ? `${task.intervalMinutes}m` : "disabled"}</td>
+                        <td className="px-2 py-1">{task.lastResult ?? "-"}</td>
+                        <td className="px-2 py-1">{task.lastRunAt ?? "-"}</td>
+                        <td className="px-2 py-1">{task.nextRunAt ?? "-"}</td>
+                        <td className="px-2 py-1">{task.lastJobId ?? "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           ) : null}
 
           <div className="max-h-80 overflow-auto rounded border border-slate-200">

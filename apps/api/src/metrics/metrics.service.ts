@@ -27,6 +27,8 @@ export class MetricsService {
   private readonly ldapFailureCounter: Counter<"reason">;
   private readonly retentionCleanupCounter: Counter<"result">;
   private readonly retentionDeletedCounter: Counter<"entity">;
+  private readonly retentionArchivedCounter: Counter<"entity">;
+  private readonly schedulerRunCounter: Counter<"task" | "result">;
 
   constructor() {
     collectDefaultMetrics({
@@ -128,6 +130,20 @@ export class MetricsService {
       labelNames: ["entity"],
       registers: [this.registry]
     });
+
+    this.retentionArchivedCounter = new Counter({
+      name: "s3gator_retention_archived_records_total",
+      help: "Retention cleanup archived record counters",
+      labelNames: ["entity"],
+      registers: [this.registry]
+    });
+
+    this.schedulerRunCounter = new Counter({
+      name: "s3gator_scheduler_runs_total",
+      help: "Maintenance scheduler task outcomes",
+      labelNames: ["task", "result"],
+      registers: [this.registry]
+    });
   }
 
   recordLogin(result: "success" | "failure", method: "local" | "ldap" | "unknown", durationSeconds?: number): void {
@@ -180,6 +196,20 @@ export class MetricsService {
       return;
     }
     this.retentionDeletedCounter.inc({ entity }, count);
+  }
+
+  recordRetentionArchived(entity: "job_events" | "audit_logs", count: number): void {
+    if (count <= 0) {
+      return;
+    }
+    this.retentionArchivedCounter.inc({ entity }, count);
+  }
+
+  recordSchedulerRun(
+    task: "retention_cleanup" | "upload_cleanup" | "bucket_sync",
+    result: "queued" | "skipped_active" | "failed"
+  ): void {
+    this.schedulerRunCounter.inc({ task, result });
   }
 
   async renderMetrics(): Promise<string> {

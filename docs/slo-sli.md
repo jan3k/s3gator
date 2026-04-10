@@ -1,6 +1,6 @@
-# SLI / SLO First Pass (Stage 5)
+# SLI / SLO First Pass (Stage 6)
 
-Date: 2026-04-09
+Date: 2026-04-10
 
 ## Purpose
 
@@ -14,6 +14,8 @@ Provide practical operator targets and queryable signals based on existing Prome
 4. Bucket sync success rate
 5. Readiness availability
 6. Retry exhaustion rate
+7. Scheduler task failure rate
+8. Retention archive/delete throughput
 
 ## Suggested SLO Targets (Starting Point)
 
@@ -35,6 +37,11 @@ Tune these by environment and operational baseline.
   - `s3gator_jobs_total{type=...,status="start|complete|fail|cancel"}`
   - `s3gator_job_retries_total{type=...,event="scheduled|started|exhausted|skipped_non_retryable"}`
   - `s3gator_job_reclaims_total{type=...}`
+- scheduler + retention:
+  - `s3gator_scheduler_runs_total{task=...,result="queued|skipped_active|failed"}`
+  - `s3gator_retention_cleanup_total{result="success|failure"}`
+  - `s3gator_retention_archived_records_total{entity=...}`
+  - `s3gator_retention_deleted_records_total{entity=...}`
 - readiness:
   - scrape success on `/health/ready`
 - S3/LDAP pressure signals:
@@ -73,6 +80,12 @@ Retry exhaustion count (15m):
 sum(increase(s3gator_job_retries_total{event="exhausted"}[15m]))
 ```
 
+Scheduler failure count (30m):
+
+```promql
+sum(increase(s3gator_scheduler_runs_total{result="failed"}[30m]))
+```
+
 ## Alert Suggestions
 
 - readiness degraded for > 5m
@@ -80,8 +93,10 @@ sum(increase(s3gator_job_retries_total{event="exhausted"}[15m]))
 - upload failure ratio above threshold
 - sustained increase in `s3gator_s3_failures_total`
 - sustained LDAP auth failures above baseline
+- scheduler task failures
+- retention cleanup failure bursts
 
 ## Scope Boundaries
 
-- This is a practical Stage 5 baseline, not a complete SRE platform.
+- This is a practical Stage 6 baseline, not a complete SRE platform.
 - Dashboards/alerts should be adapted to real traffic patterns.

@@ -21,10 +21,12 @@
     "db:seed": "npx pnpm --filter @s3gator/api seed",
     "bootstrap": "bash ./scripts/dev-bootstrap.sh",
     "maintenance:retention": "npx pnpm --filter @s3gator/api maintenance:retention",
+    "maintenance:scheduler:run-once": "npx pnpm --filter @s3gator/api maintenance:scheduler:run-once",
     "integration:up": "bash ./scripts/integration-up.sh",
     "integration:bootstrap": "node ./scripts/integration-bootstrap.mjs",
     "integration:test": "bash ./scripts/integration-test.sh",
     "integration:reliability": "bash ./scripts/integration-reliability.sh",
+    "integration:reliability:v2": "bash ./scripts/integration-reliability-v2.sh",
     "integration:down": "docker compose -f docker-compose.integration.yml down -v"
   },
   "devDependencies": {

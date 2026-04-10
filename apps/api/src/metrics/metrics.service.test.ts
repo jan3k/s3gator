@@ -22,6 +22,9 @@ describe("MetricsService", () => {
     service.recordRetentionDeleted("job_events", 10);
     service.recordRetentionDeleted("jobs", 2);
     service.recordRetentionDeleted("upload_sessions", 0);
+    service.recordRetentionArchived("job_events", 7);
+    service.recordSchedulerRun("retention_cleanup", "queued");
+    service.recordSchedulerRun("bucket_sync", "failed");
 
     const output = await service.renderMetrics();
 
@@ -32,6 +35,8 @@ describe("MetricsService", () => {
     expect(output).toContain("s3gator_job_reclaims_total");
     expect(output).toContain("s3gator_retention_cleanup_total");
     expect(output).toContain("s3gator_retention_deleted_records_total");
+    expect(output).toContain("s3gator_retention_archived_records_total");
+    expect(output).toContain("s3gator_scheduler_runs_total");
     expect(output).toContain("s3gator_s3_failures_total");
     expect(output).toContain("s3gator_ldap_auth_failures_total");
     expect(service.metricsContentType()).toContain("text/plain");

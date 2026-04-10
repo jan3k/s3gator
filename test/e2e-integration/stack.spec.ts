@@ -95,8 +95,9 @@ test("job timeline details are visible in admin UI", async ({ page }) => {
   await page.getByRole("button", { name: "Sync Buckets" }).click();
   await expect(page.getByText("Bucket sync job queued")).toBeVisible();
 
-  const row = page.locator("tr", { hasText: "BUCKET_SYNC" }).first();
-  await row.getByRole("button", { name: "Details" }).click();
+  const detailsButton = page.getByRole("button", { name: "Details" }).first();
+  await expect(detailsButton).toBeVisible();
+  await detailsButton.click();
   const timelinePanel = page.locator("div", {
     has: page.getByRole("heading", { name: "Job timeline" })
   }).first();

@@ -27,6 +27,7 @@ export interface FolderDeleteJobPayload {
 
 export interface BucketSyncJobPayload {
   actor: SessionUser;
+  reason: "manual" | "scheduled";
   ipAddress?: string;
   correlationId?: string;
 }
@@ -316,6 +317,7 @@ export class JobsService {
       message: "Job claimed by worker.",
       metadata: {
         workerId,
+        lockKey: claimed.lockKey,
         reclaimedStaleRun,
         attemptCount: claimed.attemptCount,
         maxAttempts: claimed.maxAttempts
@@ -329,6 +331,7 @@ export class JobsService {
         message: "Stale running job reclaimed by worker after lock timeout.",
         metadata: {
           workerId,
+          lockKey: claimed.lockKey,
           attemptCount: claimed.attemptCount,
           staleBefore: staleBefore.toISOString()
         }
@@ -342,6 +345,7 @@ export class JobsService {
         message: "Retry attempt started.",
         metadata: {
           workerId,
+          lockKey: claimed.lockKey,
           attemptCount: claimed.attemptCount,
           maxAttempts: claimed.maxAttempts
         }
@@ -352,6 +356,7 @@ export class JobsService {
       message: "Job execution started.",
       metadata: {
         workerId,
+        lockKey: claimed.lockKey,
         attemptCount: claimed.attemptCount
       }
     });

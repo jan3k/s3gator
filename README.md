@@ -41,15 +41,19 @@ S3Gator intentionally follows Garage realities:
 - Persistent job timeline events (`job_events`) with structured metadata.
 - Job retry/reclaim visibility in API and admin UI (`attemptCount`, `maxAttempts`, `nextRetryAt`, retry exhaustion events).
 - Operational data retention controls for `job_events`, `audit_logs`, terminal jobs, and terminal upload sessions.
+- Optional archive tier for operational history (`AuditLogArchive`, `JobEventArchive`) with archive+prune mode.
+- Scheduled maintenance with Redis leader lock and per-task scheduler state.
 - Resumable multipart upload sessions with persisted part state.
 - Prometheus metrics + health endpoints.
 - Correlation IDs + OpenTelemetry hooks for API and worker paths.
+- Operational observability assets (`ops/grafana`, `ops/prometheus`).
 - Admin panel with:
   - users/roles,
   - bucket grants/scopes,
   - LDAP and auth mode settings,
   - connection health,
   - jobs timeline view,
+  - maintenance/archive/scheduler visibility,
   - upload session visibility,
   - audit logs.
 
@@ -128,6 +132,12 @@ Run worker restart/reclaim reliability validation lane:
 npx pnpm integration:reliability
 ```
 
+Run reliability v2 lane (baseline reclaim + retry/restart/contention scenario):
+
+```bash
+npx pnpm integration:reliability:v2
+```
+
 Re-run bootstrap only:
 
 ```bash
@@ -144,6 +154,12 @@ Run direct retention cleanup maintenance command:
 
 ```bash
 npx pnpm maintenance:retention
+```
+
+Run scheduler tick once manually (operator command):
+
+```bash
+npx pnpm maintenance:scheduler:run-once
 ```
 
 ## Default Seed Account
@@ -166,8 +182,12 @@ Change defaults immediately outside local development.
 - [docs/integration-testing.md](docs/integration-testing.md)
 - [docs/telemetry.md](docs/telemetry.md)
 - [docs/data-retention.md](docs/data-retention.md)
+- [docs/data-archival.md](docs/data-archival.md)
+- [docs/scheduler.md](docs/scheduler.md)
 - [docs/reliability.md](docs/reliability.md)
 - [docs/slo-sli.md](docs/slo-sli.md)
+- [docs/observability-assets.md](docs/observability-assets.md)
+- [docs/stage6-plan.md](docs/stage6-plan.md)
 - [docs/stage2-hardening-plan.md](docs/stage2-hardening-plan.md)
 - [docs/stage3-plan.md](docs/stage3-plan.md)
 - [docs/stage4-plan.md](docs/stage4-plan.md)
@@ -178,4 +198,4 @@ Change defaults immediately outside local development.
 - Folder rename/delete jobs are durable and restart-safe, but there is no per-object checkpoint resume inside a running rename/delete operation.
 - Job cancel is best-effort and may wait for in-flight S3 calls to finish before stopping.
 - Garage bootstrap automation is designed for dev/integration/CI environments and should not be used as-is for production secret lifecycle management.
-- Retention currently uses hard-delete windows (no archive table tier in Stage 5).
+- Archive mode is optional and defaults to disabled; hard-delete-only remains the default retention mode.

@@ -14,7 +14,7 @@ const config = {
   username: process.env.INTEGRATION_ADMIN_USERNAME ?? "admin",
   password: process.env.INTEGRATION_ADMIN_PASSWORD ?? "change-me-now-please",
   workerContainer: process.env.INTEGRATION_WORKER_CONTAINER ?? "s3gator-int-worker",
-  fileCount: Number(process.env.INTEGRATION_RELIABILITY_FILE_COUNT ?? "120"),
+  fileCount: Number(process.env.INTEGRATION_RELIABILITY_FILE_COUNT ?? "300"),
   waitForRunningMs: Number(process.env.INTEGRATION_RELIABILITY_WAIT_FOR_RUNNING_MS ?? "30000"),
   waitForTerminalMs: Number(process.env.INTEGRATION_RELIABILITY_WAIT_FOR_TERMINAL_MS ?? "240000"),
   lockTtlSeconds: Number(process.env.INTEGRATION_JOB_LOCK_TTL_SECONDS ?? "20")
@@ -51,18 +51,32 @@ async function main() {
 
   await waitForCondition(
     async () => {
-      const job = await apiJson<{ status: string }>(`/jobs/${jobId}`, {
+      const job = await apiJson<{ status: string; progress?: { processedItems?: number; totalItems?: number } | null }>(`/jobs/${jobId}`, {
         method: "GET",
         cookie: session.cookie
       });
-      return job.status === "RUNNING";
+      if (job.status !== "RUNNING") {
+        return false;
+      }
+
+      const progress = job.progress ?? null;
+      if (
+        progress &&
+        typeof progress.processedItems === "number" &&
+        typeof progress.totalItems === "number" &&
+        progress.totalItems > 0
+      ) {
+        return progress.processedItems < progress.totalItems;
+      }
+
+      return true;
     },
     config.waitForRunningMs,
     "job to enter RUNNING state"
   );
 
-  log(`Killing worker container ${config.workerContainer} to simulate crash...`);
-  runDocker(["kill", config.workerContainer]);
+  log(`Stopping worker container ${config.workerContainer} to simulate crash...`);
+  runDocker(["stop", config.workerContainer]);
 
   const waitMs = (config.lockTtlSeconds + 4) * 1000;
   log(`Waiting ${waitMs}ms for lock TTL expiry...`);

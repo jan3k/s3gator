@@ -1,6 +1,6 @@
 # Operations Runbook
 
-Date: 2026-04-09
+Date: 2026-04-10
 
 ## Runtime Components
 
@@ -44,7 +44,7 @@ npx pnpm --filter @s3gator/api start:worker
 - Readiness: `GET /health/ready`
 - Metrics: `GET /metrics`
 
-Main metric families include login, upload, job, S3 error, LDAP failure, retry/reclaim, and retention cleanup signals.
+Main metric families include login, upload, job, S3 error, LDAP failure, retry/reclaim, retention cleanup, retention archive, and scheduler outcomes.
 
 ## Job Processing and Timeline
 
@@ -57,9 +57,9 @@ Main metric families include login, upload, job, S3 error, LDAP failure, retry/r
 
 Operational recommendation: monitor stalled `RUNNING` jobs and inspect timeline events before retry/cancel decisions.
 
-## Retention Maintenance
+## Retention and Archive Maintenance
 
-Retention cleanup currently uses hard-delete windows (configurable by env):
+Retention cleanup windows are configurable by env:
 
 - `RETENTION_JOB_EVENTS_DAYS`
 - `RETENTION_FAILED_JOB_DAYS`
@@ -67,6 +67,13 @@ Retention cleanup currently uses hard-delete windows (configurable by env):
 - `RETENTION_AUDIT_LOG_DAYS`
 - `RETENTION_SECURITY_AUDIT_DAYS`
 - `RETENTION_UPLOAD_SESSION_DAYS`
+- `RETENTION_ARCHIVE_ENABLED`
+- `RETENTION_ARCHIVE_BATCH_SIZE`
+
+Execution mode:
+
+1. `RETENTION_ARCHIVE_ENABLED=false` -> hard-delete retention (default)
+2. `RETENTION_ARCHIVE_ENABLED=true` -> archive+prune for `audit_logs` and `job_events`
 
 Execution paths:
 
@@ -77,6 +84,34 @@ Execution paths:
 npx pnpm maintenance:retention
 ```
 
+Run one scheduler tick manually (operator validation):
+
+```bash
+npx pnpm maintenance:scheduler:run-once
+```
+
+## Scheduled Maintenance
+
+Scheduler controls:
+
+- `MAINTENANCE_SCHEDULER_ENABLED`
+- `MAINTENANCE_SCHEDULER_TICK_SECONDS`
+- `MAINTENANCE_SCHEDULER_LOCK_TTL_SECONDS`
+- `MAINTENANCE_RETENTION_INTERVAL_MINUTES`
+- `MAINTENANCE_UPLOAD_CLEANUP_INTERVAL_MINUTES`
+- `MAINTENANCE_BUCKET_SYNC_INTERVAL_MINUTES`
+
+Safety model:
+
+1. scheduler runs in-process (API and/or worker where enabled),
+2. Redis lock prevents duplicate multi-instance ticks,
+3. tasks enqueue into regular job pipeline,
+4. active job guard prevents duplicate queue floods for same maintenance job type.
+
+Status endpoint:
+
+- `GET /jobs/maintenance/status` (admin/super-admin)
+
 ## Integration Lane Commands
 
 ```bash
@@ -84,6 +119,7 @@ npx pnpm integration:up
 npx pnpm integration:bootstrap
 npx pnpm integration:test
 npx pnpm integration:reliability
+npx pnpm integration:reliability:v2
 npx pnpm integration:down
 ```
 
@@ -98,6 +134,11 @@ What `integration:up` does:
 
 `integration:reliability` validates restart/reclaim behavior by interrupting worker execution mid-job and verifying timeline + terminal-state correctness.
 
+`integration:reliability:v2` runs:
+
+1. baseline reclaim scenario,
+2. retry+restart+multi-worker contention scenario on retryable `BUCKET_SYNC` lifecycle.
+
 ## Telemetry Runtime Controls
 
 Key environment variables:
@@ -110,9 +151,18 @@ Key environment variables:
 
 See `docs/telemetry.md` for full setup.
 
+## Observability Assets
+
+Reusable assets included in repo:
+
+- Grafana dashboard: `ops/grafana/s3gator-stage6-operations.json`
+- Prometheus alert rules: `ops/prometheus/s3gator-alerts.yml`
+
+See `docs/observability-assets.md` for import and usage guidance.
+
 ## Known Operational Boundaries
 
 - Rename/delete jobs are durable at job level; no per-object checkpoint resume in-flight.
 - Cancellation may wait for in-flight S3 calls to finish.
 - Integration bootstrap is deterministic for dev/CI, but production secret lifecycle should be managed separately.
-- Retention implementation is hard-delete only in Stage 5 (no archive tables).
+- Archive mode is optional and not a full analytics warehouse; hot queries remain on primary tables.
